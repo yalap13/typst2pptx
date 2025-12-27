@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+pyo3 = { version = "0.27.2", features = ["auto-initialize"] }
 typst = "0.13.1"
 typst-as-library = { git = "https://github.com/tfachmann/typst-as-library.git", version = "0.1.0" }
