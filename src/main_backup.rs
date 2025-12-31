@@ -4,54 +4,27 @@ use std::{env, fs};
 use typst::layout::{Frame, FrameItem, PagedDocument};
 use typst_as_library::TypstWrapperWorld;
 
-/// Convert Typst length to points (f64)
-fn to_pt(val: typst::layout::Abs) -> f64 {
-    val.to_pt()
-}
-
-fn walk_frame<'py>(frame: &Frame, slide: &Bound<'py, PyAny>, py: Python<'py>) -> PyResult<()> {
-    let shapes = slide.getattr("shapes")?;
-
-    for (pos, item) in frame.items() {
-        let x = to_pt(pos.x);
-        let y = to_pt(pos.y);
-
-        match item {
-            FrameItem::Group(group) => {
-                walk_frame(&group.frame, slide, py)?;
+fn walk_frame<'py>(frame: Frame, slide: &Bound<'py, PyAny>) -> PyResult<()> {
+    let items_iter = frame.items();
+    for item in items_iter {
+        let point = item.0;
+        match item.1.to_owned() {
+            FrameItem::Group(group_item) => {
+                walk_frame(group_item.frame, slide)?;
             }
-
-            FrameItem::Text(text) => {
-                let content = text.text.to_string();
-                if content.trim().is_empty() {
-                    continue;
-                }
-
-                let width = to_pt(text.width());
-                let height = to_pt(text.size);
-
-                let textbox = shapes.call_method1("add_textbox", (x, y, width, height))?;
-
-                let text_frame = textbox.getattr("text_frame")?;
-                text_frame.setattr("clear", py.None())?;
-
-                let p = text_frame.call_method0("add_paragraph")?;
-                p.setattr("text", content)?;
-            }
-
-            // Ignored for MVP
-            FrameItem::Shape(..) => {}
-            FrameItem::Image(..) => {}
-            FrameItem::Link(..) => {}
-            FrameItem::Tag(..) => {}
+            FrameItem::Text(text_item) => {}
+            FrameItem::Shape(shape, span) => {}
+            FrameItem::Image(image, axes, span) => {}
+            FrameItem::Link(destination, axes) => {}
+            FrameItem::Tag(tag) => {}
         }
     }
-
     Ok(())
 }
 
 fn walk_paged_document(paged_doc: PagedDocument) -> PyResult<()> {
     Python::attach(|py| {
+        // Basic imports
         let pptx = py.import("pptx")?;
         let util = py.import("pptx.util")?;
         let pts = util.getattr("Pt")?;
@@ -61,26 +34,29 @@ fn walk_paged_document(paged_doc: PagedDocument) -> PyResult<()> {
         let layouts = presentation.getattr("slide_layouts")?;
         let blank_layout = layouts.get_item(6)?;
 
-        // Set slide size from Typst page
+        // Set slide size
+        // Take the first page as reference (Typst pages are uniform)
         let first_page = &paged_doc.pages[0];
         let width_pt = first_page.frame.width().to_pt();
         let height_pt = first_page.frame.height().to_pt();
-
         presentation.setattr("slide_width", pts.call1((width_pt,))?)?;
         presentation.setattr("slide_height", pts.call1((height_pt,))?)?;
 
-        for page in &paged_doc.pages {
+        // Iterate over pages and create slides
+        let pages = paged_doc.pages;
+        for page in pages {
             let slide = slides.call_method1("add_slide", (blank_layout.clone(),))?;
-            walk_frame(&page.frame, &slide, py)?;
+            walk_frame(page.frame, &slide)?;
         }
 
+        // Save the presentation
         presentation.call_method1("save", ("my_presentation.pptx",))?;
         Ok(())
     })
 }
 
 fn main() -> PyResult<()> {
-    // Environment setup (temporary but explicit)
+    // TODO: Find a better way to set these environment variables, or some other method to locate Python and libs
     unsafe {
         env::set_var(
             "PYTHONHOME",
@@ -91,14 +67,13 @@ fn main() -> PyResult<()> {
             "/Users/coug8874/code/pyo3-test/.venv/lib/python3.13/site-packages",
         );
     }
-
-    let content = fs::read_to_string("src/source.typ").expect("Unable to read Typst source file.");
-
+    let content = fs::read_to_string("src/source.typ").expect("Unable to read file.");
     let world = TypstWrapperWorld::new("src/".to_owned(), content);
-
     let document: PagedDocument = typst::compile(&world)
         .output
-        .expect("Typst compilation failed");
+        .expect("Error compiling typst");
+
+    print!("{:?}", document);
 
     walk_paged_document(document)
 }
