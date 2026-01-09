@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Context, Result};
-use image::{codecs::png::PngEncoder, ColorType, ImageEncoder, RgbaImage};
+use anyhow::{Context, Result, anyhow};
+use image::{ColorType, ImageEncoder, RgbaImage, codecs::png::PngEncoder};
 use pyo3::{
     exceptions::PyRuntimeError,
     prelude::*,
@@ -429,7 +429,7 @@ fn collect_equations(paged_doc: &PagedDocument) -> Vec<EquationCapture> {
     captures
 }
 
-fn crop_image_to_content(image: RgbaImage) -> RgbaImage {
+fn crop_image_to_content(image: RgbaImage) -> (RgbaImage, u32, u32) {
     let width = image.width();
     let height = image.height();
 
@@ -450,7 +450,7 @@ fn crop_image_to_content(image: RgbaImage) -> RgbaImage {
     }
 
     if !found {
-        return image;
+        return (image, 0, 0);
     }
 
     let crop_width = max_x - min_x + 1;
@@ -458,7 +458,7 @@ fn crop_image_to_content(image: RgbaImage) -> RgbaImage {
     let cropped =
         image::imageops::crop_imm(&image, min_x, min_y, crop_width, crop_height).to_image();
 
-    cropped
+    (cropped, min_x, min_y)
 }
 
 fn render_equations_to_png(
@@ -483,7 +483,7 @@ fn render_equations_to_png(
         let image = RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixmap.data().to_vec())
             .ok_or_else(|| anyhow!("failed to build RGBA image for equation {}", index + 1))?;
 
-        let cropped = crop_image_to_content(image);
+        let (cropped, crop_min_x_px, crop_min_y_px) = crop_image_to_content(image);
 
         let file_name = format!("equation_page{}_{}.png", capture.page_index + 1, index + 1);
         let path = output_dir.join(file_name);
@@ -496,8 +496,9 @@ fn render_equations_to_png(
             ColorType::Rgba8.into(),
         )?;
 
-        let left_pt = capture.bbox.min_x;
-        let top_pt = capture.bbox.min_y;
+        let left_pt = crop_min_x_px as f64 / pixel_per_pt as f64;
+        let top_pt = crop_min_y_px as f64 / pixel_per_pt as f64;
+
         let width_pt = cropped.width() as f64 / pixel_per_pt as f64;
         let height_pt = cropped.height() as f64 / pixel_per_pt as f64;
 
@@ -833,8 +834,9 @@ fn main() -> PyResult<()> {
         .expect("Typst compilation failed");
 
     let equation_captures = collect_equations(&document);
-    let equation_images = render_equations_to_png(&document, &equation_captures, Path::new("equations"))
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    let equation_images =
+        render_equations_to_png(&document, &equation_captures, Path::new("equations"))
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
 
     walk_paged_document(document, &equation_images)
 }
