@@ -17,7 +17,7 @@ use typst::foundations::Smart;
 use typst::introspection::{Location, Tag};
 use typst::layout::{Abs, Frame, FrameItem, PagedDocument, Point, Size};
 use typst::text::FontStyle;
-use typst::visualize::{CurveItem, Geometry, ImageKind, Paint};
+use typst::visualize::{CurveItem, FixedStroke, Geometry, ImageKind, Paint};
 use typst_render::render as render_page;
 use typst_wrapper_world::TypstWrapperWorld;
 
@@ -77,26 +77,6 @@ impl BoundingBox {
         self.max_y = self.max_y.max(bottom);
     }
 
-    fn include_rect(&mut self, left: f64, top: f64, width: f64, height: f64) {
-        self.include_bounds(left, top, left + width, top + height);
-    }
-
-    fn width(&self) -> f64 {
-        if self.initialized {
-            self.max_x - self.min_x
-        } else {
-            0.0
-        }
-    }
-
-    fn height(&self) -> f64 {
-        if self.initialized {
-            self.max_y - self.min_y
-        } else {
-            0.0
-        }
-    }
-
     fn is_valid(&self) -> bool {
         self.initialized
     }
@@ -108,16 +88,6 @@ struct RectBounds {
     top: f64,
     right: f64,
     bottom: f64,
-}
-
-impl RectBounds {
-    fn width(&self) -> f64 {
-        self.right - self.left
-    }
-
-    fn height(&self) -> f64 {
-        self.bottom - self.top
-    }
 }
 
 #[derive(Clone)]
@@ -150,14 +120,12 @@ impl EquationBuilder {
 #[derive(Clone)]
 struct EquationCapture {
     page_index: usize,
-    location: Location,
     frame: Frame,
     bbox: BoundingBox,
 }
 
 struct EquationPng {
     page_index: usize,
-    location: Location,
     left_pt: f64,
     top_pt: f64,
     width_pt: f64,
@@ -170,6 +138,43 @@ fn paint_to_rgba(paint: &Paint) -> Option<[u8; 4]> {
         Paint::Solid(color) => Some(color.to_vec4_u8()),
         Paint::Gradient(_) | Paint::Tiling(_) => None,
     }
+}
+
+fn apply_fill<'py>(
+    shape: &Bound<'py, PyAny>,
+    fill: &Option<Paint>,
+    rgb_color: &Bound<'py, PyAny>,
+) -> PyResult<()> {
+    if let Some([r, g, b, _a]) = fill.as_ref().and_then(paint_to_rgba) {
+        let fill = shape.getattr("fill")?;
+        fill.call_method0("solid")?;
+        fill.getattr("fore_color")?
+            .setattr("rgb", rgb_color.call1((r, g, b))?)?;
+    } else {
+        shape.getattr("fill")?.call_method0("background")?;
+    }
+    Ok(())
+}
+
+fn apply_stroke<'py>(
+    shape: &Bound<'py, PyAny>,
+    stroke: Option<&FixedStroke>,
+    pt: &Bound<'py, PyAny>,
+    rgb_color: &Bound<'py, PyAny>,
+) -> PyResult<()> {
+    let line = shape.getattr("line")?;
+    if let Some(stroke) = stroke {
+        if let Some([r, g, b, _a]) = paint_to_rgba(&stroke.paint) {
+            line.getattr("color")?
+                .setattr("rgb", rgb_color.call1((r, g, b))?)?;
+            line.setattr("width", pt.call1((stroke.thickness.to_pt(),))?)?;
+            return Ok(());
+        }
+    }
+
+    line.getattr("fill")?.call_method0("background")?;
+    line.setattr("width", pt.call1((0,))?)?;
+    Ok(())
 }
 
 fn disable_shadow(shape: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -285,6 +290,22 @@ fn curve_bounds(curve: &typst::visualize::Curve, abs_offset: Offset) -> Option<R
     bounds_from_points(&points)
 }
 
+fn equation_start_location(tag: &Tag) -> Option<Location> {
+    if let Tag::Start(elem) = tag {
+        if elem.elem().name() == "equation" {
+            return elem.location();
+        }
+    }
+    None
+}
+
+fn equation_end_location(tag: &Tag) -> Option<Location> {
+    if let Tag::End(location, _) = tag {
+        return Some(*location);
+    }
+    None
+}
+
 fn item_bounds(abs_offset: Offset, item: &FrameItem) -> Option<RectBounds> {
     match item {
         FrameItem::Text(text) => {
@@ -364,23 +385,19 @@ fn collect_equations_from_frame(
                 );
             }
             FrameItem::Tag(tag) => match tag {
-                Tag::Start(elem) => {
-                    if elem.elem().name() == "equation" {
-                        if let Some(location) = elem.location() {
-                            stack.push(EquationBuilder::new(location, page_size));
-                        }
-                    }
-                }
-                Tag::End(location, _) => {
-                    if let Some(idx) = stack.iter().rposition(|eq| eq.location == *location) {
-                        let builder = stack.remove(idx);
-                        if builder.bbox.is_valid() {
-                            captures.push(EquationCapture {
-                                page_index,
-                                location: builder.location,
-                                frame: builder.frame,
-                                bbox: builder.bbox,
-                            });
+                _ => {
+                    if let Some(loc) = equation_start_location(tag) {
+                        stack.push(EquationBuilder::new(loc, page_size));
+                    } else if let Some(location) = equation_end_location(tag) {
+                        if let Some(idx) = stack.iter().rposition(|eq| eq.location == location) {
+                            let builder = stack.remove(idx);
+                            if builder.bbox.is_valid() {
+                                captures.push(EquationCapture {
+                                    page_index,
+                                    frame: builder.frame,
+                                    bbox: builder.bbox,
+                                });
+                            }
                         }
                     }
                 }
@@ -412,7 +429,7 @@ fn collect_equations(paged_doc: &PagedDocument) -> Vec<EquationCapture> {
     captures
 }
 
-fn crop_image_to_content(image: RgbaImage) -> (RgbaImage, (u32, u32)) {
+fn crop_image_to_content(image: RgbaImage) -> RgbaImage {
     let width = image.width();
     let height = image.height();
 
@@ -433,7 +450,7 @@ fn crop_image_to_content(image: RgbaImage) -> (RgbaImage, (u32, u32)) {
     }
 
     if !found {
-        return (image, (0, 0));
+        return image;
     }
 
     let crop_width = max_x - min_x + 1;
@@ -441,7 +458,7 @@ fn crop_image_to_content(image: RgbaImage) -> (RgbaImage, (u32, u32)) {
     let cropped =
         image::imageops::crop_imm(&image, min_x, min_y, crop_width, crop_height).to_image();
 
-    (cropped, (min_x, min_y))
+    cropped
 }
 
 fn render_equations_to_png(
@@ -466,7 +483,7 @@ fn render_equations_to_png(
         let image = RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixmap.data().to_vec())
             .ok_or_else(|| anyhow!("failed to build RGBA image for equation {}", index + 1))?;
 
-        let (cropped, (_crop_x, _crop_y)) = crop_image_to_content(image);
+        let cropped = crop_image_to_content(image);
 
         let file_name = format!("equation_page{}_{}.png", capture.page_index + 1, index + 1);
         let path = output_dir.join(file_name);
@@ -486,7 +503,6 @@ fn render_equations_to_png(
 
         rendered.push(EquationPng {
             page_index: capture.page_index,
-            location: capture.location,
             left_pt,
             top_pt,
             width_pt,
@@ -520,6 +536,7 @@ fn walk_frame<'py>(
         };
 
         let abs_offset = parent_offset.add(local_offset.x, local_offset.y);
+        let equation_active = !equation_stack.is_empty();
 
         match item {
             FrameItem::Group(group) => {
@@ -538,12 +555,18 @@ fn walk_frame<'py>(
                     equation_stack,
                 )?;
             }
+            FrameItem::Tag(tag) => {
+                if let Some(loc) = equation_start_location(tag) {
+                    equation_stack.push(loc);
+                } else if let Some(location) = equation_end_location(tag) {
+                    if equation_stack.last() == Some(&location) {
+                        equation_stack.pop();
+                    }
+                }
+            }
+            _ if equation_active => continue,
 
             FrameItem::Text(text) => {
-                if !equation_stack.is_empty() {
-                    continue;
-                }
-
                 let content = text.text.to_string();
                 if content.trim().is_empty() {
                     continue;
@@ -611,35 +634,10 @@ fn walk_frame<'py>(
                     )?;
                     disable_shadow(&rect)?;
 
-                    if let Some(fill_paint) = &shape.fill {
-                        if let Some([r, g, b, _a]) = paint_to_rgba(fill_paint) {
-                            let fill = rect.getattr("fill")?;
-                            fill.call_method0("solid")?;
-                            fill.getattr("fore_color")?
-                                .setattr("rgb", rgb_color.call1((r, g, b))?)?;
-                        }
-                    } else {
-                        rect.getattr("fill")?.call_method0("background")?;
-                    }
-
-                    if let Some(stroke) = &shape.stroke {
-                        if let Some([r, g, b, _a]) = paint_to_rgba(&stroke.paint) {
-                            let line = rect.getattr("line")?;
-                            line.getattr("color")?
-                                .setattr("rgb", rgb_color.call1((r, g, b))?)?;
-                            line.setattr("width", pt.call1((stroke.thickness.to_pt(),))?)?;
-                        }
-                    } else {
-                        let line = rect.getattr("line")?;
-                        line.getattr("fill")?.call_method0("background")?;
-                        line.setattr("width", pt.call1((0,))?)?;
-                    }
+                    apply_fill(&rect, &shape.fill, rgb_color)?;
+                    apply_stroke(&rect, shape.stroke.as_ref(), pt, rgb_color)?;
                 }
                 Geometry::Line(line) => {
-                    if !equation_stack.is_empty() {
-                        continue;
-                    }
-
                     let begin_x = pt.call1((abs_offset.x,))?;
                     let begin_y = pt.call1((abs_offset.y,))?;
                     let end_x = pt.call1((abs_offset.x + line.x.to_pt(),))?;
@@ -657,24 +655,9 @@ fn walk_frame<'py>(
                     )?;
                     disable_shadow(&line_shape)?;
 
-                    if let Some(stroke) = &shape.stroke {
-                        if let Some([r, g, b, _a]) = paint_to_rgba(&stroke.paint) {
-                            let line = line_shape.getattr("line")?;
-                            line.getattr("color")?
-                                .setattr("rgb", rgb_color.call1((r, g, b))?)?;
-                            line.setattr("width", pt.call1((stroke.thickness.to_pt(),))?)?;
-                        }
-                    } else {
-                        let line = line_shape.getattr("line")?;
-                        line.getattr("fill")?.call_method0("background")?;
-                        line.setattr("width", pt.call1((0,))?)?;
-                    }
+                    apply_stroke(&line_shape, shape.stroke.as_ref(), pt, rgb_color)?;
                 }
                 Geometry::Curve(curve) => {
-                    if !equation_stack.is_empty() {
-                        continue;
-                    }
-
                     if curve.0.is_empty() {
                         continue;
                     }
@@ -732,37 +715,12 @@ fn walk_frame<'py>(
                     let pptx_shape = builder.call_method0("convert_to_shape")?;
                     disable_shadow(&pptx_shape)?;
 
-                    if let Some(fill_paint) = &shape.fill {
-                        if let Some([r, g, b, _a]) = paint_to_rgba(fill_paint) {
-                            let fill = pptx_shape.getattr("fill")?;
-                            fill.call_method0("solid")?;
-                            fill.getattr("fore_color")?
-                                .setattr("rgb", rgb_color.call1((r, g, b))?)?;
-                        }
-                    } else {
-                        pptx_shape.getattr("fill")?.call_method0("background")?;
-                    }
-
-                    if let Some(stroke) = &shape.stroke {
-                        if let Some([r, g, b, _a]) = paint_to_rgba(&stroke.paint) {
-                            let line = pptx_shape.getattr("line")?;
-                            line.getattr("color")?
-                                .setattr("rgb", rgb_color.call1((r, g, b))?)?;
-                            line.setattr("width", pt.call1((stroke.thickness.to_pt(),))?)?;
-                        }
-                    } else {
-                        let line = pptx_shape.getattr("line")?;
-                        line.getattr("fill")?.call_method0("background")?;
-                        line.setattr("width", pt.call1((0,))?)?;
-                    }
+                    apply_fill(&pptx_shape, &shape.fill, rgb_color)?;
+                    apply_stroke(&pptx_shape, shape.stroke.as_ref(), pt, rgb_color)?;
                 }
             },
             FrameItem::Image(image, size, _span) => match image.kind() {
                 ImageKind::Raster(raster) => {
-                    if !equation_stack.is_empty() {
-                        continue;
-                    }
-
                     let raw = raster.data();
                     let image_bytes = PyBytes::new(py, raw.as_slice());
                     let buffer = io.getattr("BytesIO")?.call1((image_bytes,))?;
@@ -778,25 +736,7 @@ fn walk_frame<'py>(
                     eprintln!("SVG images are not yet supported in PPTX export; skipping.");
                 }
             },
-            FrameItem::Link(..) => {
-                if !equation_stack.is_empty() {
-                    continue;
-                }
-            }
-            FrameItem::Tag(tag) => match tag {
-                Tag::Start(elem) => {
-                    if elem.elem().name() == "equation" {
-                        if let Some(loc) = elem.location() {
-                            equation_stack.push(loc);
-                        }
-                    }
-                }
-                Tag::End(location, _) => {
-                    if equation_stack.last() == Some(location) {
-                        equation_stack.pop();
-                    }
-                }
-            },
+            FrameItem::Link(..) => {}
         }
     }
 
