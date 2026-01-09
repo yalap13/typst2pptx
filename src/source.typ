@@ -34,7 +34,7 @@
 
     $ I = integral_0^infinity pi/x dd(x) $
   ],
-  [Given the variable $x$, can it be rendered correctly?],
+  [Given the variable $x$, $y^3$, and $z_j$, can they be rendered correctly?],
 )
 
 == Shape

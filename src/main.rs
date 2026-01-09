@@ -497,10 +497,14 @@ fn render_equations_to_png(
         )?;
 
         let left_pt = crop_min_x_px as f64 / pixel_per_pt as f64;
-        let top_pt = crop_min_y_px as f64 / pixel_per_pt as f64;
-
+        let mut top_pt = crop_min_y_px as f64 / pixel_per_pt as f64;
         let width_pt = cropped.width() as f64 / pixel_per_pt as f64;
         let height_pt = cropped.height() as f64 / pixel_per_pt as f64;
+
+        // TODO: Find a better way to align the baseline of the equation image with surrounding text
+        if height_pt < 20.0 {
+            top_pt += 0.05 * height_pt;
+        }
 
         rendered.push(EquationPng {
             page_index: capture.page_index,
