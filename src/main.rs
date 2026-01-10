@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use image::{ColorType, ImageEncoder, RgbaImage, codecs::png::PngEncoder};
+use resvg::tiny_skia;
 use pyo3::{
     exceptions::PyRuntimeError,
     prelude::*,
@@ -746,8 +747,47 @@ fn walk_frame<'py>(
 
                     shapes.call_method1("add_picture", (buffer, left, top, width, height))?;
                 }
-                ImageKind::Svg(_) => {
-                    eprintln!("SVG images are not yet supported in PPTX export; skipping.");
+                ImageKind::Svg(svg) => {
+                    // Render the SVG into a PNG buffer sized to the Typst layout box.
+                    // Double the raster resolution while keeping slide size unchanged.
+                    let scale_factor = 2.0;
+                    let to_px = |pt: f64| ((pt * 96.0 / 72.0 * scale_factor).max(1.0).ceil()) as u32;
+                    let width_pt = size.x.to_pt();
+                    let height_pt = size.y.to_pt();
+                    let width_px = to_px(width_pt);
+                    let height_px = to_px(height_pt);
+
+                    let mut pixmap = match tiny_skia::Pixmap::new(width_px, height_px) {
+                        Some(pixmap) => pixmap,
+                        None => {
+                            eprintln!(
+                                "SVG could not allocate pixmap at {}x{}; skipping.",
+                                width_px, height_px
+                            );
+                            continue;
+                        }
+                    };
+
+                    let tree = svg.tree();
+                    let scale = tiny_skia::Transform::from_scale(
+                        width_px as f32 / tree.size().width(),
+                        height_px as f32 / tree.size().height(),
+                    );
+                    resvg::render(tree, scale, &mut pixmap.as_mut());
+
+                    let png_bytes = pixmap
+                        .encode_png()
+                        .map_err(|err| PyRuntimeError::new_err(format!("SVG encode failed: {err}")))?;
+
+                    let image_bytes = PyBytes::new(py, &png_bytes);
+                    let buffer = io.getattr("BytesIO")?.call1((image_bytes,))?;
+
+                    let width = pt.call1((width_pt,))?;
+                    let height = pt.call1((height_pt,))?;
+                    let left = pt.call1((abs_offset.x,))?;
+                    let top = pt.call1((abs_offset.y,))?;
+
+                    shapes.call_method1("add_picture", (buffer, left, top, width, height))?;
                 }
             },
             FrameItem::Link(..) => {}
@@ -838,10 +878,9 @@ fn main() -> PyResult<()> {
         );
     }
 
-    let content = fs::read_to_string("src/IST Project/Update_2025_12_03.typ")
-        .expect("Unable to read Typst source file.");
+    let content = fs::read_to_string("src/source.typ").expect("Unable to read Typst source file.");
 
-    let world = TypstWrapperWorld::new("src/IST Project".to_owned(), content);
+    let world = TypstWrapperWorld::new("src".to_owned(), content);
 
     let document: PagedDocument = typst::compile(&world)
         .output

@@ -2693,6 +2693,7 @@ dependencies = [
  "anyhow",
  "image",
  "pyo3",
+ "resvg",
  "tar",
  "time",
  "ttf-parser 0.25.1",

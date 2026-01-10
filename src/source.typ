@@ -48,3 +48,6 @@
   (0%, 4cm),
 ))
 
+== Svg image
+
+#image("monotonicity.svg")
