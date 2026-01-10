@@ -14,7 +14,7 @@ use std::{
 
 mod typst_wrapper_world;
 
-use typst::foundations::Smart;
+use typst::foundations::{Content, Smart};
 use typst::introspection::{Location, Tag};
 use typst::layout::{Abs, Frame, FrameItem, GroupItem, PagedDocument, Point, Size, Transform};
 use typst::text::FontStyle;
@@ -781,41 +781,121 @@ fn walk_frame<'py>(
                 let top = pt.call1((top_pt,))?;
                 let width = pt.call1((width_pt,))?;
                 let height = pt.call1((height_pt,))?;
-                let textbox = shapes.call_method1("add_textbox", (left, top, width, height))?;
-                if let Some(rotation_deg) = rotation_deg {
-                    textbox.setattr("rotation", rotation_deg)?;
+                let non_uniform_scale = (scale_x - scale_y).abs() > 1e-6;
+
+                if non_uniform_scale {
+                    // Compute axis-aligned bounds from the full transform (includes rotation).
+                    let corners = [
+                        item_transform.apply_point(0.0, -ascender),
+                        item_transform.apply_point(raw_width, -ascender),
+                        item_transform.apply_point(raw_width, -ascender + raw_height),
+                        item_transform.apply_point(0.0, -ascender + raw_height),
+                    ];
+                    let (min_x, min_y, max_x, max_y) = corners.iter().fold(
+                        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                        |(lx, ly, rx, by), (x, y)| {
+                            (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
+                        },
+                    );
+                    let bbox_width_pt = (max_x - min_x).max(0.1);
+                    let bbox_height_pt = (max_y - min_y).max(0.1);
+
+                    // Rasterize non-uniformly scaled text so geometry matches Typst even though
+                    // PowerPoint can't skew text natively.
+                    let target_width_pt = bbox_width_pt;
+                    let target_height_pt = bbox_height_pt;
+
+                    let mut subframe = Frame::hard(Size::zero());
+                    subframe.push(Point::zero(), FrameItem::Text(text.clone()));
+
+                    let adjusted = Affine::translate(-min_x, -min_y).mul(item_transform);
+                    let mut group = GroupItem::new(subframe);
+                    group.transform = affine_to_typst_transform(adjusted);
+
+                    let mut raster_frame = Frame::hard(Size {
+                        x: Abs::pt(target_width_pt),
+                        y: Abs::pt(target_height_pt),
+                    });
+                    raster_frame.push(Point::zero(), FrameItem::Group(group));
+
+                    let page = typst::layout::Page {
+                        frame: raster_frame,
+                        fill: Smart::Custom(None),
+                        numbering: None,
+                        supplement: Content::empty(),
+                        number: 0,
+                    };
+
+                    let dpi: f32 = 300.0;
+                    let pixel_per_pt: f32 = dpi / 72.0;
+                    let pixmap = render_page(&page, pixel_per_pt);
+                    let image = RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixmap.data().to_vec())
+                        .ok_or_else(|| PyRuntimeError::new_err("failed to build RGBA image for scaled text"))?;
+
+                    let (cropped, crop_min_x_px, crop_min_y_px) = crop_image_to_content(image);
+                    let pixel_per_pt_f64 = pixel_per_pt as f64;
+                    let final_width_pt = cropped.width() as f64 / pixel_per_pt_f64;
+                    let final_height_pt = cropped.height() as f64 / pixel_per_pt_f64;
+                    let final_left_pt = min_x + (crop_min_x_px as f64 / pixel_per_pt_f64);
+                    let final_top_pt = min_y + (crop_min_y_px as f64 / pixel_per_pt_f64);
+
+                    let mut png_bytes = Vec::new();
+                    let encoder = PngEncoder::new(&mut png_bytes);
+                    encoder
+                        .write_image(
+                            cropped.as_raw(),
+                            cropped.width(),
+                            cropped.height(),
+                            ColorType::Rgba8.into(),
+                        )
+                        .map_err(|err| PyRuntimeError::new_err(format!("PNG encode failed: {err}")))?;
+
+                    let image_bytes = PyBytes::new(py, &png_bytes);
+                    let buffer = io.getattr("BytesIO")?.call1((image_bytes,))?;
+
+                    let final_left = pt.call1((final_left_pt,))?;
+                    let final_top = pt.call1((final_top_pt,))?;
+                    let final_width = pt.call1((final_width_pt,))?;
+                    let final_height = pt.call1((final_height_pt,))?;
+                    shapes.call_method1("add_picture", (buffer, final_left, final_top, final_width, final_height))?;
+                    continue;
+                } else {
+                    let textbox = shapes.call_method1("add_textbox", (left, top, width, height))?;
+                    if let Some(rotation_deg) = rotation_deg {
+                        textbox.setattr("rotation", rotation_deg)?;
+                    }
+                    disable_shadow(&textbox)?;
+
+                    let text_frame = textbox.getattr("text_frame")?;
+                    text_frame.setattr("margin_left", pt.call1((0,))?)?;
+                    text_frame.setattr("margin_top", pt.call1((0,))?)?;
+                    text_frame.setattr("margin_right", pt.call1((0,))?)?;
+                    text_frame.setattr("margin_bottom", pt.call1((0,))?)?;
+                    text_frame.call_method0("clear")?;
+
+                    let p = text_frame.getattr("paragraphs")?.get_item(0)?;
+                    let run = p.call_method0("add_run")?;
+                    run.setattr("text", content)?;
+
+                    let font = run.getattr("font")?;
+                    let font_info = text.font.info();
+                    font.setattr("name", font_info.family.as_str())?;
+                    // Uniform scale can be represented via font size.
+                    let avg_scale = (scale_x.abs() + scale_y.abs()) / 2.0;
+                    font.setattr("size", pt.call1((text.size.to_pt() * avg_scale,))?)?;
+
+                    if let Some([r, g, b, _a]) = paint_to_rgba(&text.fill) {
+                        font.getattr("color")?
+                            .setattr("rgb", rgb_color.call1((r, g, b))?)?;
+                    }
+
+                    let variant = &font_info.variant;
+                    font.setattr("bold", variant.weight.to_number() >= 700)?;
+                    font.setattr(
+                        "italic",
+                        matches!(variant.style, FontStyle::Italic | FontStyle::Oblique),
+                    )?;
                 }
-                disable_shadow(&textbox)?;
-
-                let text_frame = textbox.getattr("text_frame")?;
-                text_frame.setattr("margin_left", pt.call1((0,))?)?;
-                text_frame.setattr("margin_top", pt.call1((0,))?)?;
-                text_frame.setattr("margin_right", pt.call1((0,))?)?;
-                text_frame.setattr("margin_bottom", pt.call1((0,))?)?;
-                text_frame.call_method0("clear")?;
-
-                let p = text_frame.getattr("paragraphs")?.get_item(0)?;
-                let run = p.call_method0("add_run")?;
-                run.setattr("text", content)?;
-
-                let font = run.getattr("font")?;
-                let font_info = text.font.info();
-                font.setattr("name", font_info.family.as_str())?;
-                // Use uniform scale to approximate text scaling; python-pptx cannot apply non-uniform text scale.
-                let avg_scale = (scale_x.abs() + scale_y.abs()) / 2.0;
-                font.setattr("size", pt.call1((text.size.to_pt() * avg_scale,))?)?;
-
-                if let Some([r, g, b, _a]) = paint_to_rgba(&text.fill) {
-                    font.getattr("color")?
-                        .setattr("rgb", rgb_color.call1((r, g, b))?)?;
-                }
-
-                let variant = &font_info.variant;
-                font.setattr("bold", variant.weight.to_number() >= 700)?;
-                font.setattr(
-                    "italic",
-                    matches!(variant.style, FontStyle::Italic | FontStyle::Oblique),
-                )?;
             }
 
             FrameItem::Shape(shape, _span) => match &shape.geometry {

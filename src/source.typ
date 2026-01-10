@@ -54,6 +54,7 @@ image("monotonicity.svg")
 )
 
 == Transform playground
+#rotate(scale($->$, 400%), -120deg)
 #grid(
   columns: (1fr, 1fr),
   [
@@ -63,10 +64,12 @@ image("monotonicity.svg")
       rotate(
         25deg,
         origin: center,
+        reflow: true,
         scale(
           x: 120%,
           y: 90%,
           origin: center,
+          reflow: true,
           box(
             width: 6cm,
             height: 2.4cm,
@@ -92,6 +95,7 @@ image("monotonicity.svg")
     #rotate(
       -30deg,
       origin: center,
+      reflow: true,
       polygon(
         fill: green.lighten(70%),
         stroke: green.darken(10%),
@@ -108,6 +112,7 @@ image("monotonicity.svg")
       scale(
         x: 110%,
         y: 110%,
+        reflow: true,
         [
           #rotate(90deg)[Math run: $integral_0^(2pi) sin(theta) d theta$]
           #rotate(-18deg)[Tilted label text]
