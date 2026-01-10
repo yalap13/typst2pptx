@@ -485,26 +485,35 @@ fn render_equations_to_png(
 
         let (cropped, crop_min_x_px, crop_min_y_px) = crop_image_to_content(image);
 
+        let pixel_per_pt_f64 = pixel_per_pt as f64;
+        let bbox_min_x_px = (capture.bbox.min_x * pixel_per_pt_f64).floor() as i64;
+        let bbox_min_y_px = (capture.bbox.min_y * pixel_per_pt_f64).floor() as i64;
+        let bbox_max_x_px = (capture.bbox.max_x * pixel_per_pt_f64).ceil() as i64;
+        let bbox_max_y_px = (capture.bbox.max_y * pixel_per_pt_f64).ceil() as i64;
+
+        let bbox_width_px = (bbox_max_x_px - bbox_min_x_px).max(1) as u32;
+        let bbox_height_px = (bbox_max_y_px - bbox_min_y_px).max(1) as u32;
+
+        let mut padded = RgbaImage::new(bbox_width_px, bbox_height_px);
+        let paste_x = (crop_min_x_px as i64 - bbox_min_x_px).max(0) as u32;
+        let paste_y = (crop_min_y_px as i64 - bbox_min_y_px).max(0) as u32;
+        image::imageops::overlay(&mut padded, &cropped, paste_x.into(), paste_y.into());
+
         let file_name = format!("equation_page{}_{}.png", capture.page_index + 1, index + 1);
         let path = output_dir.join(file_name);
         let file = fs::File::create(&path)?;
         let encoder = PngEncoder::new(file);
         encoder.write_image(
-            cropped.as_raw(),
-            cropped.width(),
-            cropped.height(),
+            padded.as_raw(),
+            padded.width(),
+            padded.height(),
             ColorType::Rgba8.into(),
         )?;
 
-        let left_pt = crop_min_x_px as f64 / pixel_per_pt as f64;
-        let mut top_pt = crop_min_y_px as f64 / pixel_per_pt as f64;
-        let width_pt = cropped.width() as f64 / pixel_per_pt as f64;
-        let height_pt = cropped.height() as f64 / pixel_per_pt as f64;
-
-        // TODO: Find a better way to align the baseline of the equation image with surrounding text
-        if height_pt < 20.0 {
-            top_pt += 0.05 * height_pt;
-        }
+        let left_pt = capture.bbox.min_x;
+        let top_pt = capture.bbox.min_y;
+        let width_pt = padded.width() as f64 / pixel_per_pt_f64;
+        let height_pt = padded.height() as f64 / pixel_per_pt_f64;
 
         rendered.push(EquationPng {
             page_index: capture.page_index,
@@ -829,9 +838,10 @@ fn main() -> PyResult<()> {
         );
     }
 
-    let content = fs::read_to_string("src/source.typ").expect("Unable to read Typst source file.");
+    let content = fs::read_to_string("src/IST Project/Update_2025_12_03.typ")
+        .expect("Unable to read Typst source file.");
 
-    let world = TypstWrapperWorld::new("src/".to_owned(), content);
+    let world = TypstWrapperWorld::new("src/IST Project".to_owned(), content);
 
     let document: PagedDocument = typst::compile(&world)
         .output
