@@ -53,6 +53,35 @@ align(center, polygon(
 image("monotonicity.svg")
 )
 
+== Shear/skew playground
+#grid(
+  columns: (1fr, 1fr),
+  [
+    #skew(ax: 20deg)[
+      Skewed text block with horizontal shear.
+    ]
+    #skew(ax: -15deg, ay: 10deg,
+      rect(
+        width: 5cm,
+        height: 2.5cm,
+        fill: purple.lighten(70%),
+        stroke: purple,
+      )
+    )
+  ],
+  [
+    #skew(ax: 12deg,
+      image("_DSC0070.png", width: 4cm)
+    )
+    #v(2em)
+    #skew(ay: 18deg,
+      [
+        $integral_0^pi sin(x) d x$
+        Skewed math + inline text
+      ]
+    )
+  ],
+)
 == Transform playground
 #rotate(scale($->$, 400%), -120deg)
 #grid(
