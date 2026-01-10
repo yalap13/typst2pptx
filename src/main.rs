@@ -16,29 +16,117 @@ mod typst_wrapper_world;
 
 use typst::foundations::Smart;
 use typst::introspection::{Location, Tag};
-use typst::layout::{Abs, Frame, FrameItem, PagedDocument, Point, Size};
+use typst::layout::{Abs, Frame, FrameItem, GroupItem, PagedDocument, Point, Size, Transform};
 use typst::text::FontStyle;
 use typst::visualize::{CurveItem, FixedStroke, Geometry, ImageKind, Paint};
 use typst_render::render as render_page;
 use typst_wrapper_world::TypstWrapperWorld;
 
-/// Simple translation-only transform accumulator (should become full rotation/scale later?)
+/// Simple 2D affine transform represented as a 2x3 matrix.
 #[derive(Clone, Copy, Debug)]
-struct Offset {
-    x: f64,
-    y: f64,
+struct Affine {
+    m11: f64,
+    m12: f64,
+    m21: f64,
+    m22: f64,
+    tx: f64,
+    ty: f64,
 }
 
-impl Offset {
-    fn zero() -> Self {
-        Self { x: 0.0, y: 0.0 }
+impl Affine {
+    fn identity() -> Self {
+        Self {
+            m11: 1.0,
+            m12: 0.0,
+            m21: 0.0,
+            m22: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        }
     }
 
-    fn add(self, dx: f64, dy: f64) -> Self {
+    fn from_typst(transform: typst::layout::Transform) -> Self {
         Self {
-            x: self.x + dx,
-            y: self.y + dy,
+            m11: transform.sx.get(),
+            m12: transform.kx.get(),
+            m21: transform.ky.get(),
+            m22: transform.sy.get(),
+            tx: transform.tx.to_pt(),
+            ty: transform.ty.to_pt(),
         }
+    }
+
+    fn translate(dx: f64, dy: f64) -> Self {
+        Self {
+            tx: dx,
+            ty: dy,
+            ..Self::identity()
+        }
+    }
+
+    /// Compose this transform with `other` (apply `other` after `self`).
+    fn mul(self, other: Self) -> Self {
+        Self {
+            m11: self.m11 * other.m11 + self.m12 * other.m21,
+            m12: self.m11 * other.m12 + self.m12 * other.m22,
+            m21: self.m21 * other.m11 + self.m22 * other.m21,
+            m22: self.m21 * other.m12 + self.m22 * other.m22,
+            tx: self.m11 * other.tx + self.m12 * other.ty + self.tx,
+            ty: self.m21 * other.tx + self.m22 * other.ty + self.ty,
+        }
+    }
+
+    fn apply_point(self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.m11 * x + self.m12 * y + self.tx,
+            self.m21 * x + self.m22 * y + self.ty,
+        )
+    }
+
+    fn without_translation(self) -> Self {
+        Self { tx: 0.0, ty: 0.0, ..self }
+    }
+
+    fn is_identity(&self) -> bool {
+        (self.m11 - 1.0).abs() < 1e-9
+            && self.m12.abs() < 1e-9
+            && self.m21.abs() < 1e-9
+            && (self.m22 - 1.0).abs() < 1e-9
+            && self.tx.abs() < 1e-9
+            && self.ty.abs() < 1e-9
+    }
+
+    /// Try to decompose into rotation (radians) and scales when there is no shear.
+    fn decompose_rotation_scale(self) -> Option<(f64, f64, f64)> {
+        // Column vectors of the linear part.
+        let sx_vec = (self.m11, self.m21);
+        let sy_vec = (self.m12, self.m22);
+
+        // If the axes aren't orthogonal, treat as sheared.
+        let dot = sx_vec.0 * sy_vec.0 + sx_vec.1 * sy_vec.1;
+        if dot.abs() > 1e-6 {
+            return None;
+        }
+
+        let scale_x = (sx_vec.0 * sx_vec.0 + sx_vec.1 * sx_vec.1).sqrt();
+        let scale_y = (sy_vec.0 * sy_vec.0 + sy_vec.1 * sy_vec.1).sqrt();
+        if scale_x.abs() < f64::EPSILON || scale_y.abs() < f64::EPSILON {
+            return None;
+        }
+
+        let rotation = sx_vec.1.atan2(sx_vec.0);
+        Some((rotation, scale_x, scale_y))
+    }
+}
+
+fn affine_to_typst_transform(affine: Affine) -> Transform {
+    Transform {
+        sx: typst::layout::Ratio::new(affine.m11),
+        kx: typst::layout::Ratio::new(affine.m12),
+        ky: typst::layout::Ratio::new(affine.m21),
+        sy: typst::layout::Ratio::new(affine.m22),
+        tx: Abs::pt(affine.tx),
+        ty: Abs::pt(affine.ty),
     }
 }
 
@@ -107,11 +195,24 @@ impl EquationBuilder {
         }
     }
 
-    fn add_item(&mut self, abs_offset: Offset, item: &FrameItem) {
-        let point = Point::new(Abs::pt(abs_offset.x), Abs::pt(abs_offset.y));
-        self.frame.push(point, item.clone());
+    fn add_item(&mut self, transform: Affine, item: &FrameItem) {
+        let (x, y) = transform.apply_point(0.0, 0.0);
+        let point = Point::new(Abs::pt(x), Abs::pt(y));
+        let linear = transform.without_translation();
 
-        if let Some(bounds) = item_bounds(abs_offset, item) {
+        let item_with_transform = if linear.is_identity() {
+            item.clone()
+        } else {
+            let mut subframe = Frame::hard(Size::zero());
+            subframe.push(Point::zero(), item.clone());
+            let mut group = GroupItem::new(subframe);
+            group.transform = affine_to_typst_transform(linear);
+            FrameItem::Group(group)
+        };
+
+        self.frame.push(point, item_with_transform);
+
+        if let Some(bounds) = item_bounds(transform, item) {
             self.bbox
                 .include_bounds(bounds.left, bounds.top, bounds.right, bounds.bottom);
         }
@@ -257,7 +358,7 @@ fn bounds_from_points(points: &[(f64, f64)]) -> Option<RectBounds> {
     })
 }
 
-fn curve_bounds(curve: &typst::visualize::Curve, abs_offset: Offset) -> Option<RectBounds> {
+fn curve_bounds(curve: &typst::visualize::Curve, transform: Affine) -> Option<RectBounds> {
     let mut points: Vec<(f64, f64)> = Vec::new();
     let mut cursor = Point::zero();
 
@@ -265,22 +366,16 @@ fn curve_bounds(curve: &typst::visualize::Curve, abs_offset: Offset) -> Option<R
         match item {
             CurveItem::Move(point) => {
                 cursor = *point;
-                points.push((
-                    abs_offset.x + point.x.to_pt(),
-                    abs_offset.y + point.y.to_pt(),
-                ));
+                points.push(transform.apply_point(point.x.to_pt(), point.y.to_pt()));
             }
             CurveItem::Line(point) => {
-                points.push((
-                    abs_offset.x + point.x.to_pt(),
-                    abs_offset.y + point.y.to_pt(),
-                ));
+                points.push(transform.apply_point(point.x.to_pt(), point.y.to_pt()));
                 cursor = *point;
             }
             CurveItem::Cubic(c1, c2, end) => {
                 let approximated = sample_cubic_points(cursor, *c1, *c2, *end, 12);
                 for (x, y) in approximated {
-                    points.push((abs_offset.x + x, abs_offset.y + y));
+                    points.push(transform.apply_point(x, y));
                 }
                 cursor = *end;
             }
@@ -307,7 +402,7 @@ fn equation_end_location(tag: &Tag) -> Option<Location> {
     None
 }
 
-fn item_bounds(abs_offset: Offset, item: &FrameItem) -> Option<RectBounds> {
+fn item_bounds(transform: Affine, item: &FrameItem) -> Option<RectBounds> {
     match item {
         FrameItem::Text(text) => {
             let width = text.width().to_pt();
@@ -315,70 +410,129 @@ fn item_bounds(abs_offset: Offset, item: &FrameItem) -> Option<RectBounds> {
             let ascender = metrics.ascender.at(text.size).to_pt();
             let descender = metrics.descender.at(text.size).to_pt();
             let height = ascender - descender;
+
+            let corners = [
+                (0.0, -ascender),
+                (width, -ascender),
+                (width, -ascender + height),
+                (0.0, -ascender + height),
+            ];
+            let mut left = f64::INFINITY;
+            let mut top = f64::INFINITY;
+            let mut right = f64::NEG_INFINITY;
+            let mut bottom = f64::NEG_INFINITY;
+            for (x, y) in corners.iter().copied() {
+                let (tx, ty) = transform.apply_point(x, y);
+                left = left.min(tx);
+                top = top.min(ty);
+                right = right.max(tx);
+                bottom = bottom.max(ty);
+            }
+
             Some(RectBounds {
-                left: abs_offset.x,
-                top: abs_offset.y - ascender,
-                right: abs_offset.x + width,
-                bottom: abs_offset.y - ascender + height,
+                left,
+                top,
+                right,
+                bottom,
             })
         }
         FrameItem::Shape(shape, _) => match &shape.geometry {
-            Geometry::Rect(size) => Some(RectBounds {
-                left: abs_offset.x,
-                top: abs_offset.y,
-                right: abs_offset.x + size.x.to_pt(),
-                bottom: abs_offset.y + size.y.to_pt(),
-            }),
-            Geometry::Line(line) => {
-                let x2 = abs_offset.x + line.x.to_pt();
-                let y2 = abs_offset.y + line.y.to_pt();
+            Geometry::Rect(size) => {
+                let corners = [
+                    transform.apply_point(0.0, 0.0),
+                    transform.apply_point(size.x.to_pt(), 0.0),
+                    transform.apply_point(size.x.to_pt(), size.y.to_pt()),
+                    transform.apply_point(0.0, size.y.to_pt()),
+                ];
+                let (min_x, min_y, max_x, max_y) = corners.iter().fold(
+                    (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                    |(lx, ly, rx, by), (x, y)| {
+                        (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
+                    },
+                );
                 Some(RectBounds {
-                    left: abs_offset.x.min(x2),
-                    top: abs_offset.y.min(y2),
-                    right: abs_offset.x.max(x2),
-                    bottom: abs_offset.y.max(y2),
+                    left: min_x,
+                    top: min_y,
+                    right: max_x,
+                    bottom: max_y,
                 })
             }
-            Geometry::Curve(curve) => curve_bounds(curve, abs_offset),
+            Geometry::Line(line) => {
+                let (x1, y1) = transform.apply_point(0.0, 0.0);
+                let (x2, y2) = transform.apply_point(line.x.to_pt(), line.y.to_pt());
+                Some(RectBounds {
+                    left: x1.min(x2),
+                    top: y1.min(y2),
+                    right: x1.max(x2),
+                    bottom: y1.max(y2),
+                })
+            }
+            Geometry::Curve(curve) => curve_bounds(curve, transform),
         },
-        FrameItem::Image(_, size, _) => Some(RectBounds {
-            left: abs_offset.x,
-            top: abs_offset.y,
-            right: abs_offset.x + size.x.to_pt(),
-            bottom: abs_offset.y + size.y.to_pt(),
-        }),
-        FrameItem::Link(_, size) => Some(RectBounds {
-            left: abs_offset.x,
-            top: abs_offset.y,
-            right: abs_offset.x + size.x.to_pt(),
-            bottom: abs_offset.y + size.y.to_pt(),
-        }),
+        FrameItem::Image(_, size, _) => {
+            let corners = [
+                transform.apply_point(0.0, 0.0),
+                transform.apply_point(size.x.to_pt(), 0.0),
+                transform.apply_point(size.x.to_pt(), size.y.to_pt()),
+                transform.apply_point(0.0, size.y.to_pt()),
+            ];
+            let (min_x, min_y, max_x, max_y) = corners.iter().fold(
+                (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                |(lx, ly, rx, by), (x, y)| {
+                    (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
+                },
+            );
+            Some(RectBounds {
+                left: min_x,
+                top: min_y,
+                right: max_x,
+                bottom: max_y,
+            })
+        }
+        FrameItem::Link(_, size) => {
+            let corners = [
+                transform.apply_point(0.0, 0.0),
+                transform.apply_point(size.x.to_pt(), 0.0),
+                transform.apply_point(size.x.to_pt(), size.y.to_pt()),
+                transform.apply_point(0.0, size.y.to_pt()),
+            ];
+            let (min_x, min_y, max_x, max_y) = corners.iter().fold(
+                (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                |(lx, ly, rx, by), (x, y)| {
+                    (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
+                },
+            );
+            Some(RectBounds {
+                left: min_x,
+                top: min_y,
+                right: max_x,
+                bottom: max_y,
+            })
+        }
         FrameItem::Group(_) | FrameItem::Tag(_) => None,
     }
 }
 
 fn collect_equations_from_frame(
     frame: &Frame,
-    parent_offset: Offset,
+    parent_transform: Affine,
     page_size: Size,
     page_index: usize,
     stack: &mut Vec<EquationBuilder>,
     captures: &mut Vec<EquationCapture>,
 ) {
     for (pos, item) in frame.items() {
-        let local_offset = Offset {
-            x: pos.x.to_pt(),
-            y: pos.y.to_pt(),
-        };
-        let abs_offset = parent_offset.add(local_offset.x, local_offset.y);
+        let translation = Affine::translate(pos.x.to_pt(), pos.y.to_pt());
+        let item_transform = parent_transform.mul(translation);
 
         match item {
             FrameItem::Group(group) => {
-                let transform = group.transform;
-                let translated_offset = abs_offset.add(transform.tx.to_pt(), transform.ty.to_pt());
+                let transform = parent_transform
+                    .mul(translation)
+                    .mul(Affine::from_typst(group.transform));
                 collect_equations_from_frame(
                     &group.frame,
-                    translated_offset,
+                    transform,
                     page_size,
                     page_index,
                     stack,
@@ -405,7 +559,7 @@ fn collect_equations_from_frame(
             },
             _ => {
                 if let Some(active) = stack.last_mut() {
-                    active.add_item(abs_offset, item);
+                    active.add_item(item_transform, item);
                 }
             }
         }
@@ -419,7 +573,7 @@ fn collect_equations(paged_doc: &PagedDocument) -> Vec<EquationCapture> {
         let mut stack: Vec<EquationBuilder> = Vec::new();
         collect_equations_from_frame(
             &page.frame,
-            Offset::zero(),
+            Affine::identity(),
             page.frame.size(),
             page_index,
             &mut stack,
@@ -532,7 +686,7 @@ fn render_equations_to_png(
 /// Walk a Typst frame tree and place items with absolute coordinates
 fn walk_frame<'py>(
     frame: &Frame,
-    parent_offset: Offset,
+    parent_transform: Affine,
     slide: &Bound<'py, PyAny>,
     py: Python<'py>,
     pt: &Bound<'py, PyAny>,
@@ -545,22 +699,19 @@ fn walk_frame<'py>(
     let io = py.import("io")?;
 
     for (pos, item) in frame.items() {
-        let local_offset = Offset {
-            x: pos.x.to_pt(),
-            y: pos.y.to_pt(),
-        };
-
-        let abs_offset = parent_offset.add(local_offset.x, local_offset.y);
+        let translation = Affine::translate(pos.x.to_pt(), pos.y.to_pt());
+        let item_transform = parent_transform.mul(translation);
         let equation_active = !equation_stack.is_empty();
 
         match item {
             FrameItem::Group(group) => {
-                // Recurse with accumulated offset
-                let transform = group.transform;
-                let translated_offset = abs_offset.add(transform.tx.to_pt(), transform.ty.to_pt());
+                // Recurse with accumulated transform
+                let transform = parent_transform
+                    .mul(translation)
+                    .mul(Affine::from_typst(group.transform));
                 walk_frame(
                     &group.frame,
-                    translated_offset,
+                    transform,
                     slide,
                     py,
                     pt,
@@ -587,14 +738,53 @@ fn walk_frame<'py>(
                     continue;
                 }
 
-                let width = pt.call1((text.width().to_pt(),))?;
+                let raw_width = text.width().to_pt();
                 let metrics = text.font.metrics();
                 let ascender = metrics.ascender.at(text.size).to_pt();
                 let descender = metrics.descender.at(text.size).to_pt();
-                let height = pt.call1((ascender - descender,))?;
-                let left = pt.call1((abs_offset.x,))?;
-                let top = pt.call1((abs_offset.y - ascender,))?;
+                let raw_height = ascender - descender;
+
+                // Try to map rotation/scale; otherwise fall back to axis-aligned bounds.
+                let (left_pt, top_pt, width_pt, height_pt, rotation_deg, scale_x, scale_y) =
+                    if let Some((rotation, scale_x, scale_y)) =
+                        item_transform.decompose_rotation_scale()
+                    {
+                        let center_local = (raw_width / 2.0, -ascender + raw_height / 2.0);
+                        let (center_x, center_y) =
+                            item_transform.apply_point(center_local.0, center_local.1);
+                        (
+                            center_x - (raw_width * scale_x) / 2.0,
+                            center_y - (raw_height * scale_y) / 2.0,
+                            raw_width * scale_x,
+                            raw_height * scale_y,
+                            Some(rotation.to_degrees()),
+                            scale_x,
+                            scale_y,
+                        )
+                    } else {
+                        let corners = [
+                            item_transform.apply_point(0.0, -ascender),
+                            item_transform.apply_point(raw_width, -ascender),
+                            item_transform.apply_point(raw_width, -ascender + raw_height),
+                            item_transform.apply_point(0.0, -ascender + raw_height),
+                        ];
+                        let (min_x, min_y, max_x, max_y) = corners.iter().fold(
+                            (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                            |(lx, ly, rx, by), (x, y)| {
+                                (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
+                            },
+                        );
+                        (min_x, min_y, max_x - min_x, max_y - min_y, None, 1.0, 1.0)
+                    };
+
+                let left = pt.call1((left_pt,))?;
+                let top = pt.call1((top_pt,))?;
+                let width = pt.call1((width_pt,))?;
+                let height = pt.call1((height_pt,))?;
                 let textbox = shapes.call_method1("add_textbox", (left, top, width, height))?;
+                if let Some(rotation_deg) = rotation_deg {
+                    textbox.setattr("rotation", rotation_deg)?;
+                }
                 disable_shadow(&textbox)?;
 
                 let text_frame = textbox.getattr("text_frame")?;
@@ -611,7 +801,9 @@ fn walk_frame<'py>(
                 let font = run.getattr("font")?;
                 let font_info = text.font.info();
                 font.setattr("name", font_info.family.as_str())?;
-                font.setattr("size", pt.call1((text.size.to_pt(),))?)?;
+                // Use uniform scale to approximate text scaling; python-pptx cannot apply non-uniform text scale.
+                let avg_scale = (scale_x.abs() + scale_y.abs()) / 2.0;
+                font.setattr("size", pt.call1((text.size.to_pt() * avg_scale,))?)?;
 
                 if let Some([r, g, b, _a]) = paint_to_rgba(&text.fill) {
                     font.getattr("color")?
@@ -632,31 +824,33 @@ fn walk_frame<'py>(
                         continue;
                     }
 
-                    let width = pt.call1((size.x.to_pt(),))?;
-                    let height = pt.call1((size.y.to_pt(),))?;
-                    let left = pt.call1((abs_offset.x,))?;
-                    let top = pt.call1((abs_offset.y,))?;
+                    let corners = [
+                        item_transform.apply_point(0.0, 0.0),
+                        item_transform.apply_point(size.x.to_pt(), 0.0),
+                        item_transform.apply_point(size.x.to_pt(), size.y.to_pt()),
+                        item_transform.apply_point(0.0, size.y.to_pt()),
+                    ];
+                    let start_x = pt.call1((corners[0].0,))?;
+                    let start_y = pt.call1((corners[0].1,))?;
+                    let builder = shapes.call_method1("build_freeform", (start_x, start_y))?;
+                    let mut pending: Vec<(f64, f64)> = Vec::new();
+                    for corner in corners.iter().skip(1) {
+                        pending.push(*corner);
+                    }
+                    add_line_segments(py, &pt, &builder, &pending, true)?;
+                    let rect_shape = builder.call_method0("convert_to_shape")?;
+                    disable_shadow(&rect_shape)?;
 
-                    let rect = shapes.call_method1(
-                        "add_shape",
-                        (
-                            mso_auto_shape.getattr("RECTANGLE")?,
-                            left,
-                            top,
-                            width,
-                            height,
-                        ),
-                    )?;
-                    disable_shadow(&rect)?;
-
-                    apply_fill(&rect, &shape.fill, rgb_color)?;
-                    apply_stroke(&rect, shape.stroke.as_ref(), pt, rgb_color)?;
+                    apply_fill(&rect_shape, &shape.fill, rgb_color)?;
+                    apply_stroke(&rect_shape, shape.stroke.as_ref(), pt, rgb_color)?;
                 }
                 Geometry::Line(line) => {
-                    let begin_x = pt.call1((abs_offset.x,))?;
-                    let begin_y = pt.call1((abs_offset.y,))?;
-                    let end_x = pt.call1((abs_offset.x + line.x.to_pt(),))?;
-                    let end_y = pt.call1((abs_offset.y + line.y.to_pt(),))?;
+                    let (x1, y1) = item_transform.apply_point(0.0, 0.0);
+                    let (x2, y2) = item_transform.apply_point(line.x.to_pt(), line.y.to_pt());
+                    let begin_x = pt.call1((x1,))?;
+                    let begin_y = pt.call1((y1,))?;
+                    let end_x = pt.call1((x2,))?;
+                    let end_y = pt.call1((y2,))?;
 
                     let line_shape = shapes.call_method1(
                         "add_connector",
@@ -682,8 +876,10 @@ fn walk_frame<'py>(
                         _ => Point::zero(),
                     };
 
-                    let start_x = pt.call1((abs_offset.x + initial_cursor.x.to_pt(),))?;
-                    let start_y = pt.call1((abs_offset.y + initial_cursor.y.to_pt(),))?;
+                    let start_global =
+                        item_transform.apply_point(initial_cursor.x.to_pt(), initial_cursor.y.to_pt());
+                    let start_x = pt.call1((start_global.0,))?;
+                    let start_y = pt.call1((start_global.1,))?;
                     let builder = shapes.call_method1("build_freeform", (start_x, start_y))?;
                     let mut cursor = initial_cursor;
                     let mut pending: Vec<(f64, f64)> = Vec::new();
@@ -694,19 +890,21 @@ fn walk_frame<'py>(
                                 add_line_segments(py, &pt, &builder, &pending, false)?;
                                 pending.clear();
 
+                                let move_global =
+                                    item_transform.apply_point(point.x.to_pt(), point.y.to_pt());
                                 builder.call_method1(
                                     "move_to",
                                     (
-                                        pt.call1((abs_offset.x + point.x.to_pt(),))?,
-                                        pt.call1((abs_offset.y + point.y.to_pt(),))?,
+                                        pt.call1((move_global.0,))?,
+                                        pt.call1((move_global.1,))?,
                                     ),
                                 )?;
                                 cursor = *point;
                             }
                             CurveItem::Line(point) => {
                                 pending.push((
-                                    abs_offset.x + point.x.to_pt(),
-                                    abs_offset.y + point.y.to_pt(),
+                                    item_transform.apply_point(point.x.to_pt(), point.y.to_pt()).0,
+                                    item_transform.apply_point(point.x.to_pt(), point.y.to_pt()).1,
                                 ));
                                 cursor = *point;
                             }
@@ -714,7 +912,8 @@ fn walk_frame<'py>(
                                 let approximated = sample_cubic_points(cursor, *c1, *c2, *end, 12);
 
                                 for (x, y) in approximated {
-                                    pending.push((abs_offset.x + x, abs_offset.y + y));
+                                    let (tx, ty) = item_transform.apply_point(x, y);
+                                    pending.push((tx, ty));
                                 }
                                 cursor = *end;
                             }
@@ -740,12 +939,47 @@ fn walk_frame<'py>(
                     let image_bytes = PyBytes::new(py, raw.as_slice());
                     let buffer = io.getattr("BytesIO")?.call1((image_bytes,))?;
 
-                    let width = pt.call1((size.x.to_pt(),))?;
-                    let height = pt.call1((size.y.to_pt(),))?;
-                    let left = pt.call1((abs_offset.x,))?;
-                    let top = pt.call1((abs_offset.y,))?;
+                    let raw_width = size.x.to_pt();
+                    let raw_height = size.y.to_pt();
+                    let (left_pt, top_pt, width_pt, height_pt, rotation_deg) =
+                        if let Some((rotation, scale_x, scale_y)) =
+                            item_transform.decompose_rotation_scale()
+                        {
+                            let (center_x, center_y) = item_transform
+                                .apply_point(raw_width / 2.0, raw_height / 2.0);
+                            (
+                                center_x - (raw_width * scale_x) / 2.0,
+                                center_y - (raw_height * scale_y) / 2.0,
+                                raw_width * scale_x,
+                                raw_height * scale_y,
+                                Some(rotation.to_degrees()),
+                            )
+                        } else {
+                            let corners = [
+                                item_transform.apply_point(0.0, 0.0),
+                                item_transform.apply_point(raw_width, 0.0),
+                                item_transform.apply_point(raw_width, raw_height),
+                                item_transform.apply_point(0.0, raw_height),
+                            ];
+                            let (min_x, min_y, max_x, max_y) = corners.iter().fold(
+                                (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                                |(lx, ly, rx, by), (x, y)| {
+                                    (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
+                                },
+                            );
+                            (min_x, min_y, max_x - min_x, max_y - min_y, None)
+                        };
 
-                    shapes.call_method1("add_picture", (buffer, left, top, width, height))?;
+                    let width = pt.call1((width_pt,))?;
+                    let height = pt.call1((height_pt,))?;
+                    let left = pt.call1((left_pt,))?;
+                    let top = pt.call1((top_pt,))?;
+
+                    let picture =
+                        shapes.call_method1("add_picture", (buffer, left, top, width, height))?;
+                    if let Some(rotation_deg) = rotation_deg {
+                        picture.setattr("rotation", rotation_deg)?;
+                    }
                 }
                 ImageKind::Svg(svg) => {
                     // Render the SVG into a PNG buffer sized to the Typst layout box.
@@ -782,12 +1016,46 @@ fn walk_frame<'py>(
                     let image_bytes = PyBytes::new(py, &png_bytes);
                     let buffer = io.getattr("BytesIO")?.call1((image_bytes,))?;
 
+                    let (left_pt, top_pt, width_pt, height_pt, rotation_deg) =
+                        if let Some((rotation, scale_x, scale_y)) =
+                            item_transform.decompose_rotation_scale()
+                        {
+                            let (center_x, center_y) = item_transform.apply_point(
+                                width_pt / 2.0,
+                                height_pt / 2.0,
+                            );
+                            (
+                                center_x - (width_pt * scale_x) / 2.0,
+                                center_y - (height_pt * scale_y) / 2.0,
+                                width_pt * scale_x,
+                                height_pt * scale_y,
+                                Some(rotation.to_degrees()),
+                            )
+                        } else {
+                            let corners = [
+                                item_transform.apply_point(0.0, 0.0),
+                                item_transform.apply_point(width_pt, 0.0),
+                                item_transform.apply_point(width_pt, height_pt),
+                                item_transform.apply_point(0.0, height_pt),
+                            ];
+                            let (min_x, min_y, max_x, max_y) = corners.iter().fold(
+                                (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                                |(lx, ly, rx, by), (x, y)| {
+                                    (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
+                                },
+                            );
+                            (min_x, min_y, max_x - min_x, max_y - min_y, None)
+                        };
                     let width = pt.call1((width_pt,))?;
                     let height = pt.call1((height_pt,))?;
-                    let left = pt.call1((abs_offset.x,))?;
-                    let top = pt.call1((abs_offset.y,))?;
+                    let left = pt.call1((left_pt,))?;
+                    let top = pt.call1((top_pt,))?;
 
-                    shapes.call_method1("add_picture", (buffer, left, top, width, height))?;
+                    let picture =
+                        shapes.call_method1("add_picture", (buffer, left, top, width, height))?;
+                    if let Some(rotation_deg) = rotation_deg {
+                        picture.setattr("rotation", rotation_deg)?;
+                    }
                 }
             },
             FrameItem::Link(..) => {}
@@ -835,7 +1103,7 @@ fn walk_paged_document(paged_doc: PagedDocument, equations: &[EquationPng]) -> P
             let mut equation_stack: Vec<Location> = Vec::new();
             walk_frame(
                 &page.frame,
-                Offset::zero(),
+                Affine::identity(),
                 &slide,
                 py,
                 &pt,
