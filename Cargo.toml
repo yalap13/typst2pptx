@@ -3,10 +3,13 @@ name = "typst2pptx"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
 anyhow = "1.0.94"
 image = { version = "0.25.4", default-features = false, features = ["png"] }
-pyo3 = { version = "0.27.2", features = ["auto-initialize"] }
+pyo3 = { version = "0.27.2", features = ["extension-module"] }
 typst = "0.13.1"
 typst-render = "0.13.1"
 typst-kit = { version = "0.13.1", features = ["embed-fonts"] }

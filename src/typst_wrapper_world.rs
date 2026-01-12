@@ -42,8 +42,8 @@ pub struct TypstWrapperWorld {
 }
 
 impl TypstWrapperWorld {
-    pub fn new(root: String, source: String) -> Self {
-        let root = PathBuf::from(root);
+    pub fn new(root: impl Into<PathBuf>, source: String) -> Self {
+        let root = root.into();
         let fonts = FontSearcher::new().include_system_fonts(true).search();
 
         Self {

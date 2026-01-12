@@ -1,19 +1,22 @@
 use anyhow::{Context, Result, anyhow};
 use image::{ColorType, ImageEncoder, RgbaImage, codecs::png::PngEncoder};
-use resvg::tiny_skia;
 use pyo3::{
     exceptions::PyRuntimeError,
     prelude::*,
     types::{PyBytes, PyList},
 };
+use resvg::tiny_skia;
 use std::{
     collections::HashMap,
-    env, fs,
+    fs,
     path::{Path, PathBuf},
+    process,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 mod typst_wrapper_world;
 
+use typst::diag::{Severity, SourceDiagnostic};
 use typst::foundations::{Content, Smart};
 use typst::introspection::{Location, Tag};
 use typst::layout::{Abs, Frame, FrameItem, GroupItem, PagedDocument, Point, Size, Transform};
@@ -84,7 +87,11 @@ impl Affine {
     }
 
     fn without_translation(self) -> Self {
-        Self { tx: 0.0, ty: 0.0, ..self }
+        Self {
+            tx: 0.0,
+            ty: 0.0,
+            ..self
+        }
     }
 
     fn has_shear(&self) -> bool {
@@ -451,10 +458,13 @@ fn item_bounds(transform: Affine, item: &FrameItem) -> Option<RectBounds> {
                     transform.apply_point(0.0, size.y.to_pt()),
                 ];
                 let (min_x, min_y, max_x, max_y) = corners.iter().fold(
-                    (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
-                    |(lx, ly, rx, by), (x, y)| {
-                        (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
-                    },
+                    (
+                        f64::INFINITY,
+                        f64::INFINITY,
+                        f64::NEG_INFINITY,
+                        f64::NEG_INFINITY,
+                    ),
+                    |(lx, ly, rx, by), (x, y)| (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y)),
                 );
                 Some(RectBounds {
                     left: min_x,
@@ -483,10 +493,13 @@ fn item_bounds(transform: Affine, item: &FrameItem) -> Option<RectBounds> {
                 transform.apply_point(0.0, size.y.to_pt()),
             ];
             let (min_x, min_y, max_x, max_y) = corners.iter().fold(
-                (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
-                |(lx, ly, rx, by), (x, y)| {
-                    (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
-                },
+                (
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                ),
+                |(lx, ly, rx, by), (x, y)| (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y)),
             );
             Some(RectBounds {
                 left: min_x,
@@ -503,10 +516,13 @@ fn item_bounds(transform: Affine, item: &FrameItem) -> Option<RectBounds> {
                 transform.apply_point(0.0, size.y.to_pt()),
             ];
             let (min_x, min_y, max_x, max_y) = corners.iter().fold(
-                (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
-                |(lx, ly, rx, by), (x, y)| {
-                    (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
-                },
+                (
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                ),
+                |(lx, ly, rx, by), (x, y)| (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y)),
             );
             Some(RectBounds {
                 left: min_x,
@@ -775,7 +791,12 @@ fn walk_frame<'py>(
                             item_transform.apply_point(0.0, -ascender + raw_height),
                         ];
                         let (min_x, min_y, max_x, max_y) = corners.iter().fold(
-                            (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                            (
+                                f64::INFINITY,
+                                f64::INFINITY,
+                                f64::NEG_INFINITY,
+                                f64::NEG_INFINITY,
+                            ),
                             |(lx, ly, rx, by), (x, y)| {
                                 (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
                             },
@@ -800,10 +821,13 @@ fn walk_frame<'py>(
                         item_transform.apply_point(0.0, -ascender + raw_height),
                     ];
                     let (min_x, min_y, max_x, max_y) = corners.iter().fold(
-                        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
-                        |(lx, ly, rx, by), (x, y)| {
-                            (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
-                        },
+                        (
+                            f64::INFINITY,
+                            f64::INFINITY,
+                            f64::NEG_INFINITY,
+                            f64::NEG_INFINITY,
+                        ),
+                        |(lx, ly, rx, by), (x, y)| (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y)),
                     );
                     let bbox_width_pt = (max_x - min_x).max(0.1);
                     let bbox_height_pt = (max_y - min_y).max(0.1);
@@ -837,8 +861,14 @@ fn walk_frame<'py>(
                     let dpi: f32 = 300.0;
                     let pixel_per_pt: f32 = dpi / 72.0;
                     let pixmap = render_page(&page, pixel_per_pt);
-                    let image = RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixmap.data().to_vec())
-                        .ok_or_else(|| PyRuntimeError::new_err("failed to build RGBA image for scaled text"))?;
+                    let image = RgbaImage::from_raw(
+                        pixmap.width(),
+                        pixmap.height(),
+                        pixmap.data().to_vec(),
+                    )
+                    .ok_or_else(|| {
+                        PyRuntimeError::new_err("failed to build RGBA image for scaled text")
+                    })?;
 
                     let (cropped, crop_min_x_px, crop_min_y_px) = crop_image_to_content(image);
                     let pixel_per_pt_f64 = pixel_per_pt as f64;
@@ -856,7 +886,9 @@ fn walk_frame<'py>(
                             cropped.height(),
                             ColorType::Rgba8.into(),
                         )
-                        .map_err(|err| PyRuntimeError::new_err(format!("PNG encode failed: {err}")))?;
+                        .map_err(|err| {
+                            PyRuntimeError::new_err(format!("PNG encode failed: {err}"))
+                        })?;
 
                     let image_bytes = PyBytes::new(py, &png_bytes);
                     let buffer = io.getattr("BytesIO")?.call1((image_bytes,))?;
@@ -865,7 +897,10 @@ fn walk_frame<'py>(
                     let final_top = pt.call1((final_top_pt,))?;
                     let final_width = pt.call1((final_width_pt,))?;
                     let final_height = pt.call1((final_height_pt,))?;
-                    shapes.call_method1("add_picture", (buffer, final_left, final_top, final_width, final_height))?;
+                    shapes.call_method1(
+                        "add_picture",
+                        (buffer, final_left, final_top, final_width, final_height),
+                    )?;
                     continue;
                 } else {
                     let textbox = shapes.call_method1("add_textbox", (left, top, width, height))?;
@@ -964,8 +999,8 @@ fn walk_frame<'py>(
                         _ => Point::zero(),
                     };
 
-                    let start_global =
-                        item_transform.apply_point(initial_cursor.x.to_pt(), initial_cursor.y.to_pt());
+                    let start_global = item_transform
+                        .apply_point(initial_cursor.x.to_pt(), initial_cursor.y.to_pt());
                     let start_x = pt.call1((start_global.0,))?;
                     let start_y = pt.call1((start_global.1,))?;
                     let builder = shapes.call_method1("build_freeform", (start_x, start_y))?;
@@ -982,17 +1017,18 @@ fn walk_frame<'py>(
                                     item_transform.apply_point(point.x.to_pt(), point.y.to_pt());
                                 builder.call_method1(
                                     "move_to",
-                                    (
-                                        pt.call1((move_global.0,))?,
-                                        pt.call1((move_global.1,))?,
-                                    ),
+                                    (pt.call1((move_global.0,))?, pt.call1((move_global.1,))?),
                                 )?;
                                 cursor = *point;
                             }
                             CurveItem::Line(point) => {
                                 pending.push((
-                                    item_transform.apply_point(point.x.to_pt(), point.y.to_pt()).0,
-                                    item_transform.apply_point(point.x.to_pt(), point.y.to_pt()).1,
+                                    item_transform
+                                        .apply_point(point.x.to_pt(), point.y.to_pt())
+                                        .0,
+                                    item_transform
+                                        .apply_point(point.x.to_pt(), point.y.to_pt())
+                                        .1,
                                 ));
                                 cursor = *point;
                             }
@@ -1044,8 +1080,8 @@ fn walk_frame<'py>(
                         let left = pt.call1((left_pt,))?;
                         let top = pt.call1((top_pt,))?;
 
-                        let picture =
-                            shapes.call_method1("add_picture", (buffer, left, top, width, height))?;
+                        let picture = shapes
+                            .call_method1("add_picture", (buffer, left, top, width, height))?;
                         picture.setattr("rotation", rotation.to_degrees())?;
                     } else {
                         // Shear or non-orthogonal transform: rasterize with full affine.
@@ -1056,7 +1092,12 @@ fn walk_frame<'py>(
                             item_transform.apply_point(0.0, raw_height),
                         ];
                         let (min_x, min_y, max_x, max_y) = corners.iter().fold(
-                            (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                            (
+                                f64::INFINITY,
+                                f64::INFINITY,
+                                f64::NEG_INFINITY,
+                                f64::NEG_INFINITY,
+                            ),
                             |(lx, ly, rx, by), (x, y)| {
                                 (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
                             },
@@ -1065,7 +1106,10 @@ fn walk_frame<'py>(
                         let target_height_pt = (max_y - min_y).max(0.1);
 
                         let mut subframe = Frame::hard(Size::zero());
-                        subframe.push(Point::zero(), FrameItem::Image(image.clone(), *size, *_span));
+                        subframe.push(
+                            Point::zero(),
+                            FrameItem::Image(image.clone(), *size, *_span),
+                        );
 
                         let adjusted = Affine::translate(-min_x, -min_y).mul(item_transform);
                         let mut group = GroupItem::new(subframe);
@@ -1093,9 +1137,12 @@ fn walk_frame<'py>(
                             pixmap.height(),
                             pixmap.data().to_vec(),
                         )
-                        .ok_or_else(|| PyRuntimeError::new_err("failed to build RGBA image for sheared image"))?;
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err("failed to build RGBA image for sheared image")
+                        })?;
 
-                        let (cropped, crop_min_x_px, crop_min_y_px) = crop_image_to_content(raster_image);
+                        let (cropped, crop_min_x_px, crop_min_y_px) =
+                            crop_image_to_content(raster_image);
                         let pixel_per_pt_f64 = pixel_per_pt as f64;
                         let final_width_pt = cropped.width() as f64 / pixel_per_pt_f64;
                         let final_height_pt = cropped.height() as f64 / pixel_per_pt_f64;
@@ -1111,7 +1158,9 @@ fn walk_frame<'py>(
                                 cropped.height(),
                                 ColorType::Rgba8.into(),
                             )
-                            .map_err(|err| PyRuntimeError::new_err(format!("PNG encode failed: {err}")))?;
+                            .map_err(|err| {
+                                PyRuntimeError::new_err(format!("PNG encode failed: {err}"))
+                            })?;
 
                         let raster_image_bytes = PyBytes::new(py, &png_bytes);
                         let raster_buffer = io.getattr("BytesIO")?.call1((raster_image_bytes,))?;
@@ -1122,7 +1171,13 @@ fn walk_frame<'py>(
                         let final_height = pt.call1((final_height_pt,))?;
                         shapes.call_method1(
                             "add_picture",
-                            (raster_buffer, final_left, final_top, final_width, final_height),
+                            (
+                                raster_buffer,
+                                final_left,
+                                final_top,
+                                final_width,
+                                final_height,
+                            ),
                         )?;
                     }
                 }
@@ -1130,7 +1185,8 @@ fn walk_frame<'py>(
                     // Render the SVG into a PNG buffer sized to the Typst layout box.
                     // Double the raster resolution while keeping slide size unchanged.
                     let scale_factor = 2.0;
-                    let to_px = |pt: f64| ((pt * 96.0 / 72.0 * scale_factor).max(1.0).ceil()) as u32;
+                    let to_px =
+                        |pt: f64| ((pt * 96.0 / 72.0 * scale_factor).max(1.0).ceil()) as u32;
                     let width_pt = size.x.to_pt();
                     let height_pt = size.y.to_pt();
                     let width_px = to_px(width_pt);
@@ -1154,9 +1210,9 @@ fn walk_frame<'py>(
                     );
                     resvg::render(tree, scale, &mut pixmap.as_mut());
 
-                    let png_bytes = pixmap
-                        .encode_png()
-                        .map_err(|err| PyRuntimeError::new_err(format!("SVG encode failed: {err}")))?;
+                    let png_bytes = pixmap.encode_png().map_err(|err| {
+                        PyRuntimeError::new_err(format!("SVG encode failed: {err}"))
+                    })?;
 
                     let image_bytes = PyBytes::new(py, &png_bytes);
                     let buffer = io.getattr("BytesIO")?.call1((image_bytes,))?;
@@ -1175,8 +1231,8 @@ fn walk_frame<'py>(
                         let left = pt.call1((left_pt,))?;
                         let top = pt.call1((top_pt,))?;
 
-                        let picture =
-                            shapes.call_method1("add_picture", (buffer, left, top, width, height))?;
+                        let picture = shapes
+                            .call_method1("add_picture", (buffer, left, top, width, height))?;
                         picture.setattr("rotation", rotation.to_degrees())?;
                     } else {
                         // Shear: rasterize with full affine.
@@ -1187,7 +1243,12 @@ fn walk_frame<'py>(
                             item_transform.apply_point(0.0, height_pt),
                         ];
                         let (min_x, min_y, max_x, max_y) = corners.iter().fold(
-                            (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                            (
+                                f64::INFINITY,
+                                f64::INFINITY,
+                                f64::NEG_INFINITY,
+                                f64::NEG_INFINITY,
+                            ),
                             |(lx, ly, rx, by), (x, y)| {
                                 (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y))
                             },
@@ -1196,7 +1257,10 @@ fn walk_frame<'py>(
                         let target_height_pt = (max_y - min_y).max(0.1);
 
                         let mut subframe = Frame::hard(Size::zero());
-                        subframe.push(Point::zero(), FrameItem::Image(image.clone(), *size, *_span));
+                        subframe.push(
+                            Point::zero(),
+                            FrameItem::Image(image.clone(), *size, *_span),
+                        );
 
                         let adjusted = Affine::translate(-min_x, -min_y).mul(item_transform);
                         let mut group = GroupItem::new(subframe);
@@ -1224,7 +1288,9 @@ fn walk_frame<'py>(
                             pixmap.height(),
                             pixmap.data().to_vec(),
                         )
-                        .ok_or_else(|| PyRuntimeError::new_err("failed to build RGBA image for sheared svg"))?;
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err("failed to build RGBA image for sheared svg")
+                        })?;
 
                         let (cropped, crop_min_x_px, crop_min_y_px) =
                             crop_image_to_content(raster_image);
@@ -1243,7 +1309,9 @@ fn walk_frame<'py>(
                                 cropped.height(),
                                 ColorType::Rgba8.into(),
                             )
-                            .map_err(|err| PyRuntimeError::new_err(format!("PNG encode failed: {err}")))?;
+                            .map_err(|err| {
+                                PyRuntimeError::new_err(format!("PNG encode failed: {err}"))
+                            })?;
 
                         let final_bytes = PyBytes::new(py, &final_png_bytes);
                         let final_buffer = io.getattr("BytesIO")?.call1((final_bytes,))?;
@@ -1254,7 +1322,13 @@ fn walk_frame<'py>(
                         let final_height = pt.call1((final_height_pt,))?;
                         shapes.call_method1(
                             "add_picture",
-                            (final_buffer, final_left, final_top, final_width, final_height),
+                            (
+                                final_buffer,
+                                final_left,
+                                final_top,
+                                final_width,
+                                final_height,
+                            ),
                         )?;
                     }
                 }
@@ -1266,99 +1340,238 @@ fn walk_frame<'py>(
     Ok(())
 }
 
-fn walk_paged_document(paged_doc: PagedDocument, equations: &[EquationPng]) -> PyResult<()> {
-    Python::attach(|py| {
-        let pptx = py.import("pptx")?;
-        let util = py.import("pptx.util")?;
-        let pt = util.getattr("Pt")?;
-        let color_mod = py.import("pptx.dml.color")?;
-        let rgb_color = color_mod.getattr("RGBColor")?;
-        let shapes_enum = py.import("pptx.enum.shapes")?;
-        let mso_auto_shape = shapes_enum.getattr("MSO_AUTO_SHAPE_TYPE")?;
-        let mso_connector = shapes_enum.getattr("MSO_CONNECTOR_TYPE")?;
+fn walk_paged_document(
+    py: Python<'_>,
+    paged_doc: PagedDocument,
+    equations: &[EquationPng],
+    output_path: &Path,
+) -> PyResult<()> {
+    let pptx = py.import("pptx")?;
+    let util = py.import("pptx.util")?;
+    let pt = util.getattr("Pt")?;
+    let color_mod = py.import("pptx.dml.color")?;
+    let rgb_color = color_mod.getattr("RGBColor")?;
+    let shapes_enum = py.import("pptx.enum.shapes")?;
+    let mso_auto_shape = shapes_enum.getattr("MSO_AUTO_SHAPE_TYPE")?;
+    let mso_connector = shapes_enum.getattr("MSO_CONNECTOR_TYPE")?;
 
-        let presentation = pptx.getattr("Presentation")?.call0()?;
-        let slides = presentation.getattr("slides")?;
-        let layouts = presentation.getattr("slide_layouts")?;
-        let blank_layout = layouts.get_item(6)?;
+    let presentation = pptx.getattr("Presentation")?.call0()?;
+    let slides = presentation.getattr("slides")?;
+    let layouts = presentation.getattr("slide_layouts")?;
+    let blank_layout = layouts.get_item(6)?;
 
-        let mut equations_by_page: HashMap<usize, Vec<&EquationPng>> = HashMap::new();
-        for equation in equations {
-            equations_by_page
-                .entry(equation.page_index)
-                .or_default()
-                .push(equation);
-        }
-
-        // Set slide size from Typst page dimensions
-        let first_page = &paged_doc.pages[0];
-        let width_pt = first_page.frame.width().to_pt();
-        let height_pt = first_page.frame.height().to_pt();
-
-        presentation.setattr("slide_width", pt.call1((width_pt,))?)?;
-        presentation.setattr("slide_height", pt.call1((height_pt,))?)?;
-
-        // Create slides and render content
-        for (page_index, page) in paged_doc.pages.iter().enumerate() {
-            let slide = slides.call_method1("add_slide", (blank_layout.clone(),))?;
-            let mut equation_stack: Vec<Location> = Vec::new();
-            walk_frame(
-                &page.frame,
-                Affine::identity(),
-                &slide,
-                py,
-                &pt,
-                &rgb_color,
-                &mso_auto_shape,
-                &mso_connector,
-                &mut equation_stack,
-            )?;
-
-            if let Some(page_equations) = equations_by_page.get(&page_index) {
-                let shapes = slide.getattr("shapes")?;
-                for eq in page_equations {
-                    let left = pt.call1((eq.left_pt,))?;
-                    let top = pt.call1((eq.top_pt,))?;
-                    let width = pt.call1((eq.width_pt,))?;
-                    let height = pt.call1((eq.height_pt,))?;
-                    shapes.call_method1(
-                        "add_picture",
-                        (eq.path.to_string_lossy().as_ref(), left, top, width, height),
-                    )?;
-                }
-            }
-        }
-
-        presentation.call_method1("save", ("my_presentation.pptx",))?;
-        Ok(())
-    })
-}
-
-fn main() -> PyResult<()> {
-    // Temporary explicit Python environment setup
-    unsafe {
-        env::set_var(
-            "PYTHONHOME",
-            "/Users/coug8874/.local/share/uv/python/cpython-3.13.7-macos-aarch64-none",
-        );
-        env::set_var(
-            "PYTHONPATH",
-            "/Users/coug8874/code/pyo3-test/.venv/lib/python3.13/site-packages",
-        );
+    let mut equations_by_page: HashMap<usize, Vec<&EquationPng>> = HashMap::new();
+    for equation in equations {
+        equations_by_page
+            .entry(equation.page_index)
+            .or_default()
+            .push(equation);
     }
 
-    let content = fs::read_to_string("src/source.typ").expect("Unable to read Typst source file.");
+    // Set slide size from Typst page dimensions
+    let first_page = paged_doc
+        .pages
+        .first()
+        .ok_or_else(|| PyRuntimeError::new_err("Typst document contained no pages"))?;
+    let width_pt = first_page.frame.width().to_pt();
+    let height_pt = first_page.frame.height().to_pt();
 
-    let world = TypstWrapperWorld::new("src".to_owned(), content);
+    presentation.setattr("slide_width", pt.call1((width_pt,))?)?;
+    presentation.setattr("slide_height", pt.call1((height_pt,))?)?;
 
-    let document: PagedDocument = typst::compile(&world)
+    // Create slides and render content
+    for (page_index, page) in paged_doc.pages.iter().enumerate() {
+        let slide = slides.call_method1("add_slide", (blank_layout.clone(),))?;
+        let mut equation_stack: Vec<Location> = Vec::new();
+        walk_frame(
+            &page.frame,
+            Affine::identity(),
+            &slide,
+            py,
+            &pt,
+            &rgb_color,
+            &mso_auto_shape,
+            &mso_connector,
+            &mut equation_stack,
+        )?;
+
+        if let Some(page_equations) = equations_by_page.get(&page_index) {
+            let shapes = slide.getattr("shapes")?;
+            for eq in page_equations {
+                let left = pt.call1((eq.left_pt,))?;
+                let top = pt.call1((eq.top_pt,))?;
+                let width = pt.call1((eq.width_pt,))?;
+                let height = pt.call1((eq.height_pt,))?;
+                shapes.call_method1(
+                    "add_picture",
+                    (eq.path.to_string_lossy().as_ref(), left, top, width, height),
+                )?;
+            }
+        }
+    }
+
+    presentation.call_method1("save", (output_path.to_string_lossy().as_ref(),))?;
+    Ok(())
+}
+
+fn format_typst_messages(messages: impl IntoIterator<Item = SourceDiagnostic>) -> String {
+    messages
+        .into_iter()
+        .map(|diagnostic| {
+            let severity = match diagnostic.severity {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+            };
+
+            let mut message = format!("{severity}: {}", diagnostic.message);
+            if !diagnostic.hints.is_empty() {
+                let hints = diagnostic
+                    .hints
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                message.push_str(&format!(" (hints: {hints})"));
+            }
+
+            message
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn compile_document(root: &Path, content: String) -> PyResult<PagedDocument> {
+    let world = TypstWrapperWorld::new(root.to_path_buf(), content);
+    let warned = typst::compile::<PagedDocument>(&world);
+
+    if !warned.warnings.is_empty() {
+        eprintln!("{}", format_typst_messages(warned.warnings.iter().cloned()));
+    }
+
+    warned
         .output
-        .expect("Typst compilation failed");
+        .map_err(|errors| PyRuntimeError::new_err(format_typst_messages(errors)))
+}
 
+fn equation_output_dir(dir_override: Option<&str>) -> PyResult<(PathBuf, bool)> {
+    if let Some(dir) = dir_override {
+        return Ok((PathBuf::from(dir), false));
+    }
+
+    let mut path = std::env::temp_dir();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| PyRuntimeError::new_err(format!("system clock error: {err}")))?;
+    path.push(format!(
+        "typst2pptx-equations-{}-{}",
+        timestamp.as_nanos(),
+        process::id()
+    ));
+
+    Ok((path, true))
+}
+
+fn ensure_output_parent(path: &Path) -> PyResult<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|err| {
+                PyRuntimeError::new_err(format!(
+                    "failed to create parent directory {}: {err}",
+                    parent.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn build_presentation(
+    py: Python<'_>,
+    document: PagedDocument,
+    output_path: &Path,
+    equations_dir: Option<&str>,
+) -> PyResult<()> {
     let equation_captures = collect_equations(&document);
-    let equation_images =
-        render_equations_to_png(&document, &equation_captures, Path::new("equations"))
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    let (equation_dir, cleanup) = equation_output_dir(equations_dir)?;
+    let equation_images = match render_equations_to_png(
+        &document,
+        &equation_captures,
+        &equation_dir,
+    ) {
+        Ok(images) => images,
+        Err(err) => {
+            if cleanup {
+                if let Err(clean_err) = fs::remove_dir_all(&equation_dir) {
+                    eprintln!(
+                        "warning: failed to clean up temporary equation directory {}: {clean_err}",
+                        equation_dir.display()
+                    );
+                }
+            }
+            return Err(PyRuntimeError::new_err(err.to_string()));
+        }
+    };
 
-    walk_paged_document(document, &equation_images)
+    let result = walk_paged_document(py, document, &equation_images, output_path);
+
+    if cleanup {
+        if let Err(err) = fs::remove_dir_all(&equation_dir) {
+            eprintln!(
+                "warning: failed to clean up temporary equation directory {}: {err}",
+                equation_dir.display()
+            );
+        }
+    }
+
+    result
+}
+
+#[pyfunction]
+fn typst_to_pptx(
+    py: Python<'_>,
+    source_path: &str,
+    output_path: &str,
+    equations_dir: Option<&str>,
+) -> PyResult<()> {
+    let typst_path = Path::new(source_path);
+    let output_path = Path::new(output_path);
+
+    ensure_output_parent(output_path)?;
+
+    let content = fs::read_to_string(typst_path).map_err(|err| {
+        PyRuntimeError::new_err(format!(
+            "failed to read Typst source {}: {err}",
+            typst_path.display()
+        ))
+    })?;
+
+    let root = typst_path.parent().unwrap_or_else(|| Path::new("."));
+    let document = compile_document(root, content)?;
+
+    build_presentation(py, document, output_path, equations_dir)
+}
+
+#[pyfunction]
+fn typst_source_to_pptx(
+    py: Python<'_>,
+    source: &str,
+    root_dir: &str,
+    output_path: &str,
+    equations_dir: Option<&str>,
+) -> PyResult<()> {
+    let output_path = Path::new(output_path);
+
+    ensure_output_parent(output_path)?;
+
+    let root = Path::new(root_dir);
+    let document = compile_document(root, source.to_owned())?;
+
+    build_presentation(py, document, output_path, equations_dir)
+}
+
+#[pymodule]
+fn typst2pptx(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(typst_to_pptx, m)?)?;
+    m.add_function(wrap_pyfunction!(typst_source_to_pptx, m)?)?;
+    Ok(())
 }
