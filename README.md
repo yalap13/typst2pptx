@@ -7,21 +7,21 @@ Requirements
 ------------
 - Python 3.12+
 - Rust toolchain (for the PyO3 extension)
-- `uv` for the suggested install path
+- `uv` for the suggested installation method
 
 We are currently working to make this tool available on PyPI to avoid the need for Rust at install time.
 
 Installation (user)
 -------------------
-Clone the repo, then install the tool into your environment with `uv`:
+Clone the repo, then install the tool using `maturin` and `uv` (this installs the tool globally):
 
 ```
-git clone https://github.com/…/typst2pptx.git
+git clone https://github.com/yalap13/typst2pptx.git
 cd typst2pptx
+uv sync
+maturin develop
 uv tool install .
 ```
-
-That builds the native extension with `maturin` behind the scenes and installs a `typst2pptx` CLI.
 
 Usage
 -----
@@ -32,21 +32,12 @@ typst2pptx path/to/doc.typ
 ```
 
 Options:
-- `-o/--output`: override output path (defaults to `<sourcename>.pptx`).
-- `--equations-dir PATH`: keep rendered equation PNGs under `PATH` instead of a temp dir; when omitted, they are written to a temp `typst2pptx-equations-<timestamp>-<pid>` folder and cleaned up afterward.
+- `-o/--output PATH`: override output path (defaults to `<sourcename>.pptx`).
+- `--equations-dir PATH`: keep rendered equation PNGs under `PATH` instead of a temporary directory. By default, they are written to a temp `typst2pptx-equations-<timestamp>-<pid>` folder and cleaned up afterward.
 
 Notes:
-- Typst packages are fetched as needed; set `CACHE_DIRECTORY` to control where they are cached.
-- Hyperlinks are currently dropped (`FrameItem::Link` is ignored); most geometry, rotation, and scaling are preserved, with rasterization used for skewed text/images or complex shapes.
-- There is a sample Typst source at `src/source.typ`; try `typst2pptx src/source.typ -o my_presentation.pptx`.
-
-How it works (short version)
-----------------------------
-- Compiles the Typst document, walks each page frame, and maps elements into PowerPoint shapes.
-- Equations are isolated, rendered to PNG at 300 DPI, and reinserted at their original coordinates.
-- When PowerPoint cannot express a transform (e.g., non-uniform scaling or skew), the affected content is rasterized to preserve layout.
+- Typst packages are fetched as needed. 
+- There is a sample Typst source at `src/source.typ` with its image dependencies. You can try `typst2pptx src/source.typ -o my_presentation.pptx`.
+- Skewed and non-uniformly scaled text/images are rasterized.
 - Text stays editable where possible (e.g. when not skewed or scaled non-uniformly).
-
-Contributing
-------------
-- Make your changes, then rerun `maturin develop` after touching Rust code so the Python module is rebuilt.
+- Currently missing: support for gradients and hyperlinks (anything else?).
