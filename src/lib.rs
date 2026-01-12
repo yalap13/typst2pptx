@@ -18,8 +18,9 @@ mod typst_wrapper_world;
 
 use typst::diag::{Severity, SourceDiagnostic};
 use typst::foundations::{Content, Smart};
-use typst::introspection::{Location, Tag};
+use typst::introspection::{Introspector, Location, Tag};
 use typst::layout::{Abs, Frame, FrameItem, GroupItem, PagedDocument, Point, Size, Transform};
+use typst::model::Destination;
 use typst::text::FontStyle;
 use typst::visualize::{CurveItem, FixedStroke, Geometry, ImageKind, Paint};
 use typst_render::render as render_page;
@@ -246,6 +247,22 @@ struct EquationPng {
     width_pt: f64,
     height_pt: f64,
     path: PathBuf,
+}
+
+enum HyperlinkTarget {
+    External(String),
+    Slide(usize),
+}
+
+fn resolve_link_target(dest: &Destination, introspector: &Introspector) -> Option<HyperlinkTarget> {
+    match dest {
+        Destination::Url(url) => Some(HyperlinkTarget::External(url.to_string())),
+        Destination::Position(pos) => Some(HyperlinkTarget::Slide(pos.page.get() - 1)),
+        Destination::Location(loc) => {
+            let position = introspector.position(*loc);
+            Some(HyperlinkTarget::Slide(position.page.get() - 1))
+        }
+    }
 }
 
 fn paint_to_rgba(paint: &Paint) -> Option<[u8; 4]> {
@@ -716,6 +733,8 @@ fn walk_frame<'py>(
     mso_auto_shape: &Bound<'py, PyAny>,
     mso_connector: &Bound<'py, PyAny>,
     equation_stack: &mut Vec<Location>,
+    introspector: &Introspector,
+    slides: &[Bound<'py, PyAny>],
 ) -> PyResult<()> {
     let shapes = slide.getattr("shapes")?;
     let io = py.import("io")?;
@@ -741,6 +760,8 @@ fn walk_frame<'py>(
                     mso_auto_shape,
                     mso_connector,
                     equation_stack,
+                    introspector,
+                    slides,
                 )?;
             }
             FrameItem::Tag(tag) => {
@@ -1333,7 +1354,39 @@ fn walk_frame<'py>(
                     }
                 }
             },
-            FrameItem::Link(..) => {}
+            FrameItem::Link(dest, size) => {
+                if let Some(target) = resolve_link_target(dest, introspector) {
+                    let corners = [
+                        item_transform.apply_point(0.0, 0.0),
+                        item_transform.apply_point(size.x.to_pt(), 0.0),
+                        item_transform.apply_point(size.x.to_pt(), size.y.to_pt()),
+                        item_transform.apply_point(0.0, size.y.to_pt()),
+                    ];
+                    let start_x = pt.call1((corners[0].0,))?;
+                    let start_y = pt.call1((corners[0].1,))?;
+                    let builder = shapes.call_method1("build_freeform", (start_x, start_y))?;
+                    add_line_segments(py, &pt, &builder, &corners[1..], true)?;
+
+                    let link_shape = builder.call_method0("convert_to_shape")?;
+                    disable_shadow(&link_shape)?;
+                    link_shape.getattr("fill")?.call_method0("background")?;
+                    let line = link_shape.getattr("line")?;
+                    line.getattr("fill")?.call_method0("background")?;
+                    line.setattr("width", pt.call1((0,))?)?;
+
+                    let click_action = link_shape.getattr("click_action")?;
+                    match target {
+                        HyperlinkTarget::External(url) => {
+                            click_action.getattr("hyperlink")?.setattr("address", url)?;
+                        }
+                        HyperlinkTarget::Slide(target_index) => {
+                            if let Some(target_slide) = slides.get(target_index) {
+                                click_action.setattr("target_slide", target_slide.clone())?;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1379,20 +1432,26 @@ fn walk_paged_document(
     presentation.setattr("slide_width", pt.call1((width_pt,))?)?;
     presentation.setattr("slide_height", pt.call1((height_pt,))?)?;
 
+    let mut slide_refs = Vec::with_capacity(paged_doc.pages.len());
+    for _ in &paged_doc.pages {
+        slide_refs.push(slides.call_method1("add_slide", (blank_layout.clone(),))?);
+    }
+
     // Create slides and render content
-    for (page_index, page) in paged_doc.pages.iter().enumerate() {
-        let slide = slides.call_method1("add_slide", (blank_layout.clone(),))?;
+    for (page_index, (page, slide)) in paged_doc.pages.iter().zip(slide_refs.iter()).enumerate() {
         let mut equation_stack: Vec<Location> = Vec::new();
         walk_frame(
             &page.frame,
             Affine::identity(),
-            &slide,
+            slide,
             py,
             &pt,
             &rgb_color,
             &mso_auto_shape,
             &mso_connector,
             &mut equation_stack,
+            &paged_doc.introspector,
+            &slide_refs,
         )?;
 
         if let Some(page_equations) = equations_by_page.get(&page_index) {

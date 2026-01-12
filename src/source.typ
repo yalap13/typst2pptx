@@ -9,6 +9,8 @@
   ),
 )
 #set text(font: "IBM Plex Sans")
+#show link: underline
+#show link: set text(blue.darken(20%))
 
 #title-slide()
 
@@ -37,7 +39,7 @@
   [Given the variable $x$, $y^3$, and $z_j$, can they be rendered correctly?],
 )
 
-== Shape
+== Shape <shape_slide>
 #rotate(45deg,
 align(center, polygon(
   fill: blue.lighten(80%),
@@ -150,3 +152,9 @@ image("monotonicity.svg")
     )
   ],
 )
+
+== Links
+
+Test link to the #link("https://example.com")[See example.com]
+
+And a link to a #link(<shape_slide>)[different slide]
