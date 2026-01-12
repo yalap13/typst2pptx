@@ -217,8 +217,10 @@ image("monotonicity.svg")
   ],
 )
 
-== Links
+== Links and color
 
 Test link to the #link("https://example.com")[See example.com]
 
 And a link to a #link(<shape_slide>)[different slide]
+
+Make some #text(red.darken(30%))[red text], some #text(green.lighten(20%))[green text], and some #text(blue)[blue text].
