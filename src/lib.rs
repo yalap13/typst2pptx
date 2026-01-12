@@ -19,10 +19,14 @@ mod typst_wrapper_world;
 use typst::diag::{Severity, SourceDiagnostic};
 use typst::foundations::{Content, Smart};
 use typst::introspection::{Introspector, Location, Tag};
-use typst::layout::{Abs, Frame, FrameItem, GroupItem, PagedDocument, Point, Size, Transform};
+use typst::layout::{
+    Abs, Angle, Frame, FrameItem, GroupItem, PagedDocument, Point, Size, Transform,
+};
 use typst::model::Destination;
 use typst::text::FontStyle;
-use typst::visualize::{CurveItem, FixedStroke, Geometry, ImageKind, Paint};
+use typst::visualize::{
+    Color, CurveItem, FixedStroke, Geometry, Gradient, ImageKind, LinearGradient, Paint,
+};
 use typst_render::render as render_page;
 use typst_wrapper_world::TypstWrapperWorld;
 
@@ -267,9 +271,13 @@ fn resolve_link_target(dest: &Destination, introspector: &Introspector) -> Optio
 
 fn paint_to_rgba(paint: &Paint) -> Option<[u8; 4]> {
     match paint {
-        Paint::Solid(color) => Some(color.to_vec4_u8()),
+        Paint::Solid(color) => Some(color_to_rgb_bytes(color)),
         Paint::Gradient(_) | Paint::Tiling(_) => None,
     }
+}
+
+fn color_to_rgb_bytes(color: &Color) -> [u8; 4] {
+    color.to_rgb().to_vec4_u8()
 }
 
 fn apply_fill<'py>(
@@ -277,14 +285,110 @@ fn apply_fill<'py>(
     fill: &Option<Paint>,
     rgb_color: &Bound<'py, PyAny>,
 ) -> PyResult<()> {
-    if let Some([r, g, b, _a]) = fill.as_ref().and_then(paint_to_rgba) {
-        let fill = shape.getattr("fill")?;
-        fill.call_method0("solid")?;
-        fill.getattr("fore_color")?
-            .setattr("rgb", rgb_color.call1((r, g, b))?)?;
-    } else {
-        shape.getattr("fill")?.call_method0("background")?;
+    match fill {
+        Some(Paint::Solid(color)) => {
+            apply_solid_fill(shape, color, rgb_color)?;
+        }
+        Some(Paint::Gradient(gradient)) => match gradient {
+            Gradient::Linear(gradient) => {
+                apply_linear_gradient_fill(shape, gradient, rgb_color)?;
+            }
+            // Radial/conic not supported yet: fall back to first stop as solid.
+            Gradient::Radial(radial) => {
+                if let Some((color, _)) = radial.stops.first() {
+                    apply_solid_fill(shape, color, rgb_color)?;
+                } else {
+                    shape.getattr("fill")?.call_method0("background")?;
+                }
+            }
+            Gradient::Conic(conic) => {
+                if let Some((color, _)) = conic.stops.first() {
+                    apply_solid_fill(shape, color, rgb_color)?;
+                } else {
+                    shape.getattr("fill")?.call_method0("background")?;
+                }
+            }
+        },
+        _ => {
+            shape.getattr("fill")?.call_method0("background")?;
+        }
     }
+    Ok(())
+}
+
+fn apply_solid_fill<'py>(
+    shape: &Bound<'py, PyAny>,
+    color: &Color,
+    rgb_color: &Bound<'py, PyAny>,
+) -> PyResult<()> {
+    let fill = shape.getattr("fill")?;
+    let [r, g, b, _a] = color_to_rgb_bytes(color);
+    fill.call_method0("solid")?;
+    fill.getattr("fore_color")?
+        .setattr("rgb", rgb_color.call1((r, g, b))?)?;
+    Ok(())
+}
+
+fn typst_clockwise_to_ccw_degrees(angle: Angle) -> f64 {
+    // Typst angles rotate clockwise with 0deg pointing right; python-pptx
+    // expects counter-clockwise degrees from the same origin.
+    let cw = angle.to_deg().rem_euclid(360.0);
+    if cw.abs() < f64::EPSILON {
+        360.0
+    } else {
+        (360.0 - cw).rem_euclid(360.0)
+    }
+}
+
+fn apply_linear_gradient_fill<'py>(
+    shape: &Bound<'py, PyAny>,
+    gradient: &LinearGradient,
+    rgb_color: &Bound<'py, PyAny>,
+) -> PyResult<()> {
+    if gradient.stops.len() < 2 {
+        if let Some((color, _)) = gradient.stops.first() {
+            return apply_solid_fill(shape, color, rgb_color);
+        }
+        shape.getattr("fill")?.call_method0("background")?;
+        return Ok(());
+    }
+
+    let fill = shape.getattr("fill")?;
+    fill.call_method0("gradient")?;
+
+    // Ensure there are enough stops; we reuse existing ones to avoid blowing
+    // away internal state in python-pptx.
+    let stops_obj = fill.getattr("gradient_stops")?;
+    let gs_list = stops_obj.getattr("_gsLst")?;
+    let current_len: usize = stops_obj.getattr("__len__")?.call0()?.extract()?;
+    if gradient.stops.len() > current_len {
+        for _ in 0..(gradient.stops.len() - current_len) {
+            gs_list.call_method0("add_gs")?;
+        }
+    }
+
+    for (idx, (color, offset)) in gradient.stops.iter().enumerate() {
+        let stop = stops_obj.call_method1("__getitem__", (idx,))?;
+        let [r, g, b, _a] = color_to_rgb_bytes(color);
+        let position = if offset.get().is_finite() {
+            offset.get().clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        stop.setattr("position", position)?;
+        stop.getattr("color")?
+            .setattr("rgb", rgb_color.call1((r, g, b))?)?;
+    }
+
+    let angle_deg = typst_clockwise_to_ccw_degrees(gradient.angle);
+    // python-pptx treats 360deg the same as 0deg when writing, but its setter
+    // expects a valid angle value; 360deg maps to clockwise 0 internally.
+    let angle_for_api = if (angle_deg - 360.0).abs() < f64::EPSILON {
+        360.0
+    } else {
+        angle_deg
+    };
+    fill.setattr("gradient_angle", angle_for_api)?;
     Ok(())
 }
 

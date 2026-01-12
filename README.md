@@ -40,4 +40,4 @@ Notes:
 - There is a sample Typst source at `src/source.typ` with its image dependencies. You can try `typst2pptx src/source.typ -o my_presentation.pptx`.
 - Skewed and non-uniformly scaled text/images are rasterized.
 - Text stays editable where possible (e.g. when not skewed or scaled non-uniformly).
-- Currently missing: support for gradients (anything else?).
+- Linear gradients work, but radial/conic gradients are not currently supported.

@@ -1,6 +1,9 @@
+#let typ_gradient = gradient
+
 #import "@preview/touying:0.6.1": *
 #import themes.metropolis: *
 #import "@preview/physica:0.9.0": *
+
 
 #show: metropolis-theme.with(
   aspect-ratio: "16-9",
@@ -37,6 +40,67 @@
     $ I = integral_0^infinity pi/x dd(x) $
   ],
   [Given the variable $x$, $y^3$, and $z_j$, can they be rendered correctly?],
+)
+
+== Linear gradients
+#grid(
+  columns: (1fr, 1fr),
+  row-gutter: 1em,
+  [
+    #rect(
+      width: 5cm,
+      height: 2cm,
+      fill: typ_gradient.linear(
+        red,
+        yellow,
+        angle: 0deg,
+      ),
+      stroke: red,
+    )
+    [Left-to-right gradient (0deg)]
+  ],
+  [
+    #rect(
+      width: 5cm,
+      height: 2cm,
+      fill: typ_gradient.linear(
+        blue.lighten(40%),
+        purple,
+        angle: 90deg,
+      ),
+      stroke: purple,
+    )
+    [Top-to-bottom gradient (90deg)]
+  ],
+  [
+    #rect(
+      width: 5cm,
+      height: 2cm,
+      fill: typ_gradient.linear(
+        (blue.lighten(60%), 0%),
+        (teal, 20%),
+        (green, 45%),
+        (yellow, 60%),
+        (orange, 80%),
+        (red, 100%),
+        angle: 225deg,
+      ),
+      stroke: teal.darken(10%),
+    )
+    [Multi-stop diagonal (225deg)]
+  ],
+  [
+    #rect(
+      width: 5cm,
+      height: 2cm,
+      fill: typ_gradient.radial(
+        gray,
+        blue.lighten(70%),
+      ),
+      stroke: black,
+    )
+    [Radial (Not currently supported)]
+  ]
 )
 
 == Shape <shape_slide>
