@@ -3,6 +3,19 @@ name = "typst2pptx"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
+anyhow = "1.0.94"
+image = { version = "0.25.4", default-features = false, features = ["png"] }
+pyo3 = { version = "0.27.2", features = ["extension-module"] }
 typst = "0.13.1"
-typst-as-library = { git = "https://github.com/tfachmann/typst-as-library.git", version = "0.1.0" }
+typst-render = "0.13.1"
+typst-kit = { version = "0.13.1", features = ["embed-fonts"] }
+time = "0.3"
+tar = "0.4"
+ttf-parser = "0.25"
+ureq = "2.9"
+zune-inflate = { version = "0.2", default-features = false, features = ["gzip", "std"] }
+resvg = "0.43"

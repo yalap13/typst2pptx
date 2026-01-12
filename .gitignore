@@ -1,1 +1,7 @@
 /target
+.DS_Store
+**.pptx
+equations/
+**.pdf
+**.so
+.venv
