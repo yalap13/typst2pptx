@@ -1543,6 +1543,12 @@ fn walk_paged_document(
 
     // Create slides and render content
     for (page_index, (page, slide)) in paged_doc.pages.iter().zip(slide_refs.iter()).enumerate() {
+        // Apply page background if explicitly set in Typst.
+        if let Smart::Custom(fill) = &page.fill {
+            let background = slide.getattr("background")?;
+            apply_fill(&background, fill, &rgb_color)?;
+        }
+
         let mut equation_stack: Vec<Location> = Vec::new();
         walk_frame(
             &page.frame,
