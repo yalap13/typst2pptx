@@ -94,7 +94,7 @@
       width: 5cm,
       height: 2cm,
       fill: typ_gradient.radial(
-        gray,
+        black,
         blue.lighten(70%),
       ),
       stroke: black,
@@ -224,3 +224,15 @@ Test link to the #link("https://example.com")[See example.com]
 And a link to a #link(<shape_slide>)[different slide]
 
 Make some #text(red.darken(30%))[red text], some #text(green.lighten(20%))[green text], and some #text(blue)[blue text].
+
+== Code and background colour
+
+#set page(fill: blue.lighten(90%))
+
+Here is a simple Python code snippet:
+```python
+def greet(name):
+    print(f"Hello, {name}!")
+
+greet("World")
+```
