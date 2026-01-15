@@ -1,3 +1,4 @@
+use dirs::data_dir;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -118,6 +119,17 @@ impl TypstWrapperWorld {
 
     /// Downloads the package and returns the system path of the unpacked package.
     fn download_package(&self, package: &PackageSpec) -> PackageResult<PathBuf> {
+        if package.namespace == "local" {
+            let data_directory = data_dir().unwrap();
+            let subdir = format!(
+                "typst/packages/{}/{}/{}",
+                package.namespace, package.name, package.version
+            );
+            let path = data_directory.join(subdir);
+            if path.exists() {
+                return Ok(path);
+            }
+        }
         let package_subdir = format!("{}/{}/{}", package.namespace, package.name, package.version);
         let path = self.cache_directory.join(package_subdir);
 

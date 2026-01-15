@@ -2691,6 +2691,7 @@ name = "typst2pptx"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "image",
  "pyo3",
  "resvg",
