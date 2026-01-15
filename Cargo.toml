@@ -19,3 +19,4 @@ ttf-parser = "0.25"
 ureq = "2.9"
 zune-inflate = { version = "0.2", default-features = false, features = ["gzip", "std"] }
 resvg = "0.43"
+dirs = "6.0.0"

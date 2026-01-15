@@ -5,3 +5,4 @@ equations/
 **.pdf
 **.so
 .venv
+__pycache__
