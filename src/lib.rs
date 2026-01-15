@@ -1307,11 +1307,11 @@ fn walk_frame<'py>(
                     }
                 }
                 ImageKind::Svg(svg) => {
-                    // Render the SVG into a PNG buffer sized to the Typst layout box.
-                    // Double the raster resolution while keeping slide size unchanged.
-                    let scale_factor = 2.0;
+                    // Render the SVG into a PNG buffer sized to the Typst layout box at 300 dpi.
+                    let dpi: f32 = 300.0;
+                    let pixel_per_pt: f32 = dpi / 72.0;
                     let to_px =
-                        |pt: f64| ((pt * 96.0 / 72.0 * scale_factor).max(1.0).ceil()) as u32;
+                        |pt: f64| ((pt * pixel_per_pt as f64).max(1.0).ceil()) as u32;
                     let width_pt = size.x.to_pt();
                     let height_pt = size.y.to_pt();
                     let width_px = to_px(width_pt);
