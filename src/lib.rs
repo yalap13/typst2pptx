@@ -271,16 +271,44 @@ fn resolve_link_target(
     }
 }
 
-fn paint_to_rgba(paint: &Paint) -> Option<[u8; 4]> {
+fn solid_color(paint: &Paint) -> Option<&Color> {
     match paint {
-        Paint::Solid(color) => Some(color_to_rgb_bytes(color)),
+        Paint::Solid(color) => Some(color),
         Paint::Gradient(_) | Paint::Tiling(_) => None,
     }
 }
 
-fn color_to_rgb_bytes(color: &Color) -> [u8; 4] {
-    let (r, g, b, a) = color.to_rgb().into_format::<u8, u8>().into_components();
-    [r, g, b, a]
+/// python-pptx exposes RGB but not opacity, so write DrawingML alpha directly.
+fn apply_color(
+    target: &Bound<'_, PyAny>,
+    color: &Color,
+    rgb_color: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let rgba = color.to_rgb();
+    let opacity = (rgba.alpha as f64 * 100_000.0)
+        .round()
+        .clamp(0.0, 100_000.0) as u32;
+    let (r, g, b, _) = rgba.into_format::<u8, u8>().into_components();
+    target.setattr("rgb", rgb_color.call1((r, g, b))?)?;
+
+    let srgb = target.getattr("_xFill")?.getattr("srgbClr")?;
+    // Replace any previous opacity instead of accumulating color transforms.
+    for alpha in srgb
+        .call_method1("xpath", ("./a:alpha | ./a:alphaMod | ./a:alphaOff",))?
+        .try_iter()?
+    {
+        srgb.call_method1("remove", (alpha?,))?;
+    }
+    if opacity < 100_000 {
+        let alpha = target
+            .py()
+            .import("pptx.oxml.xmlchemy")?
+            .getattr("OxmlElement")?
+            .call1(("a:alpha",))?;
+        alpha.call_method1("set", ("val", opacity.to_string()))?;
+        srgb.call_method1("append", (alpha,))?;
+    }
+    Ok(())
 }
 
 fn apply_fill<'py>(
@@ -325,10 +353,8 @@ fn apply_solid_fill<'py>(
     rgb_color: &Bound<'py, PyAny>,
 ) -> PyResult<()> {
     let fill = shape.getattr("fill")?;
-    let [r, g, b, _a] = color_to_rgb_bytes(color);
     fill.call_method0("solid")?;
-    fill.getattr("fore_color")?
-        .setattr("rgb", rgb_color.call1((r, g, b))?)?;
+    apply_color(&fill.getattr("fore_color")?, color, rgb_color)?;
     Ok(())
 }
 
@@ -372,15 +398,13 @@ fn apply_linear_gradient_fill<'py>(
 
     for (idx, (color, offset)) in gradient.stops.iter().enumerate() {
         let stop = stops_obj.call_method1("__getitem__", (idx,))?;
-        let [r, g, b, _a] = color_to_rgb_bytes(color);
         let position = if offset.get().is_finite() {
             offset.get().clamp(0.0, 1.0)
         } else {
             0.0
         };
         stop.setattr("position", position)?;
-        stop.getattr("color")?
-            .setattr("rgb", rgb_color.call1((r, g, b))?)?;
+        apply_color(&stop.getattr("color")?, color, rgb_color)?;
     }
 
     let angle_deg = typst_clockwise_to_ccw_degrees(gradient.angle);
@@ -403,9 +427,8 @@ fn apply_stroke<'py>(
 ) -> PyResult<()> {
     let line = shape.getattr("line")?;
     if let Some(stroke) = stroke {
-        if let Some([r, g, b, _a]) = paint_to_rgba(&stroke.paint) {
-            line.getattr("color")?
-                .setattr("rgb", rgb_color.call1((r, g, b))?)?;
+        if let Some(color) = solid_color(&stroke.paint) {
+            apply_color(&line.getattr("color")?, color, rgb_color)?;
             line.setattr("width", pt.call1((stroke.thickness.to_pt(),))?)?;
             return Ok(());
         }
@@ -1068,9 +1091,8 @@ fn walk_frame<'py>(
                     let avg_scale = (scale_x.abs() + scale_y.abs()) / 2.0;
                     font.setattr("size", pt.call1((text.size.to_pt() * avg_scale,))?)?;
 
-                    if let Some([r, g, b, _a]) = paint_to_rgba(&text.fill) {
-                        font.getattr("color")?
-                            .setattr("rgb", rgb_color.call1((r, g, b))?)?;
+                    if let Some(color) = solid_color(&text.fill) {
+                        apply_color(&font.getattr("color")?, color, rgb_color)?;
                     }
 
                     let variant = &font_info.variant;

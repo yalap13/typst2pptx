@@ -6,3 +6,4 @@ equations/
 **.so
 .venv
 __pycache__
+tests
