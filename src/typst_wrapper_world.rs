@@ -1,16 +1,17 @@
 use dirs::data_dir;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use typst::Library;
 use typst::diag::{FileError, FileResult, PackageError, PackageResult, eco_format};
-use typst::foundations::{Bytes, Datetime};
+use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::package::PackageSpec;
-use typst::syntax::{FileId, Source};
+use typst::syntax::{FileId, Source, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
-use typst_kit::fonts::{FontSearcher, FontSlot};
+use typst::{Library, LibraryExt};
+use typst_kit::fonts::{self, FontStore};
 
 /// Main interface that determines the environment for Typst.
 pub struct TypstWrapperWorld {
@@ -24,10 +25,7 @@ pub struct TypstWrapperWorld {
     library: LazyHash<Library>,
 
     /// Metadata about all known fonts.
-    book: LazyHash<FontBook>,
-
-    /// Metadata about all known fonts.
-    fonts: Vec<FontSlot>,
+    fonts: FontStore,
 
     /// Map of all known files.
     files: Arc<Mutex<HashMap<FileId, FileEntry>>>,
@@ -45,19 +43,20 @@ pub struct TypstWrapperWorld {
 impl TypstWrapperWorld {
     pub fn new(root: impl Into<PathBuf>, source: String) -> Self {
         let root = root.into();
-        let fonts = FontSearcher::new().include_system_fonts(true).search();
+        let mut fonts = FontStore::new();
+        fonts.extend(fonts::system());
+        fonts.extend(fonts::embedded());
 
         Self {
             library: LazyHash::new(Library::default()),
-            book: LazyHash::new(fonts.book),
             root,
-            fonts: fonts.fonts,
+            fonts,
             source: Source::detached(source),
             time: time::OffsetDateTime::now_utc(),
             cache_directory: std::env::var_os("CACHE_DIRECTORY")
                 .map(|os_path| os_path.into())
                 .unwrap_or(std::env::temp_dir()),
-            http: ureq::Agent::new(),
+            http: ureq::Agent::new_with_defaults(),
             files: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -100,15 +99,15 @@ impl TypstWrapperWorld {
         if let Some(entry) = files.get(&id) {
             return Ok(entry.clone());
         }
-        let path = if let Some(package) = id.package() {
+        let path = if let VirtualRoot::Package(package) = id.root() {
             // Fetching file from package
             let package_dir = self.download_package(package)?;
-            id.vpath().resolve(&package_dir)
+            id.vpath().realize(&package_dir)
         } else {
             // Fetching file from disk
-            id.vpath().resolve(&self.root)
+            id.vpath().realize(&self.root)
         }
-        .ok_or(FileError::AccessDenied)?;
+        .map_err(|_| FileError::AccessDenied)?;
 
         let content = std::fs::read(&path).map_err(|error| FileError::from_io(error, &path))?;
         Ok(files
@@ -143,7 +142,7 @@ impl TypstWrapperWorld {
             package.namespace, package.name, package.version,
         );
 
-        let response = retry(|| {
+        let mut response = retry(|| {
             let response = self
                 .http
                 .get(&url)
@@ -151,7 +150,7 @@ impl TypstWrapperWorld {
                 .map_err(|error| eco_format!("{error}"))?;
 
             let status = response.status();
-            if !http_successful(status) {
+            if !status.is_success() {
                 return Err(eco_format!(
                     "response returned unsuccessful status code {status}",
                 ));
@@ -163,7 +162,8 @@ impl TypstWrapperWorld {
 
         let mut compressed_archive = Vec::new();
         response
-            .into_reader()
+            .body_mut()
+            .as_reader()
             .read_to_end(&mut compressed_archive)
             .map_err(|error| PackageError::NetworkFailed(Some(eco_format!("{error}"))))?;
         let raw_archive = zune_inflate::DeflateDecoder::new(&compressed_archive)
@@ -190,7 +190,7 @@ impl typst::World for TypstWrapperWorld {
 
     /// Metadata about all known Books.
     fn book(&self) -> &LazyHash<FontBook> {
-        &self.book
+        self.fonts.book()
     }
 
     /// Accessing the main source file.
@@ -214,15 +214,16 @@ impl typst::World for TypstWrapperWorld {
 
     /// Accessing a specified font per index of font book.
     fn font(&self, id: usize) -> Option<Font> {
-        self.fonts[id].get()
+        self.fonts.font(id)
     }
 
     /// Get the current date.
     ///
-    /// Optionally, an offset in hours is given.
-    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
-        let offset = offset.unwrap_or(0);
-        let offset = time::UtcOffset::from_hms(offset.try_into().ok()?, 0, 0).ok()?;
+    /// Optionally, an offset as a duration is given.
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
+        let offset: time::Duration = offset.map(Into::into).unwrap_or(time::Duration::ZERO);
+        let offset =
+            time::UtcOffset::from_whole_seconds(offset.whole_seconds().try_into().ok()?).ok()?;
         let time = self.time.checked_to_offset(offset)?;
         Some(Datetime::Date(time.date()))
     }
@@ -230,9 +231,4 @@ impl typst::World for TypstWrapperWorld {
 
 fn retry<T, E>(mut f: impl FnMut() -> Result<T, E>) -> Result<T, E> {
     if let Ok(ok) = f() { Ok(ok) } else { f() }
-}
-
-fn http_successful(status: u16) -> bool {
-    // 2XX
-    status / 100 == 2
 }

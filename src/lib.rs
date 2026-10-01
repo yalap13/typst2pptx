@@ -19,15 +19,14 @@ mod typst_wrapper_world;
 use typst::diag::{Severity, SourceDiagnostic};
 use typst::foundations::{Content, Smart};
 use typst::introspection::{Introspector, Location, Tag};
-use typst::layout::{
-    Abs, Angle, Frame, FrameItem, GroupItem, PagedDocument, Point, Size, Transform,
-};
+use typst::layout::{Abs, Angle, Frame, FrameItem, GroupItem, Point, Size, Transform};
 use typst::model::Destination;
 use typst::text::FontStyle;
 use typst::visualize::{
     Color, CurveItem, FixedStroke, Geometry, Gradient, ImageKind, LinearGradient, Paint,
 };
-use typst_render::render as render_page;
+use typst_layout::{Page, PagedDocument};
+use typst_render::{RenderOptions, render as render_page};
 use typst_wrapper_world::TypstWrapperWorld;
 
 /// Simple 2D affine transform represented as a 2x3 matrix.
@@ -258,12 +257,15 @@ enum HyperlinkTarget {
     Slide(usize),
 }
 
-fn resolve_link_target(dest: &Destination, introspector: &Introspector) -> Option<HyperlinkTarget> {
+fn resolve_link_target(
+    dest: &Destination,
+    introspector: &dyn Introspector,
+) -> Option<HyperlinkTarget> {
     match dest {
         Destination::Url(url) => Some(HyperlinkTarget::External(url.to_string())),
         Destination::Position(pos) => Some(HyperlinkTarget::Slide(pos.page.get() - 1)),
         Destination::Location(loc) => {
-            let position = introspector.position(*loc);
+            let position = introspector.position(*loc)?.as_paged()?;
             Some(HyperlinkTarget::Slide(position.page.get() - 1))
         }
     }
@@ -277,7 +279,8 @@ fn paint_to_rgba(paint: &Paint) -> Option<[u8; 4]> {
 }
 
 fn color_to_rgb_bytes(color: &Color) -> [u8; 4] {
-    color.to_rgb().to_vec4_u8()
+    let (r, g, b, a) = color.to_rgb().into_format::<u8, u8>().into_components();
+    [r, g, b, a]
 }
 
 fn apply_fill<'py>(
@@ -521,7 +524,7 @@ fn curve_bounds(curve: &typst::visualize::Curve, transform: Affine) -> Option<Re
 }
 
 fn equation_start_location(tag: &Tag) -> Option<Location> {
-    if let Tag::Start(elem) = tag {
+    if let Tag::Start(elem, _) = tag {
         if elem.elem().name() == "equation" {
             return elem.location();
         }
@@ -530,7 +533,7 @@ fn equation_start_location(tag: &Tag) -> Option<Location> {
 }
 
 fn equation_end_location(tag: &Tag) -> Option<Location> {
-    if let Tag::End(location, _) = tag {
+    if let Tag::End(location, _, _) = tag {
         return Some(*location);
     }
     None
@@ -712,7 +715,7 @@ fn collect_equations_from_frame(
 fn collect_equations(paged_doc: &PagedDocument) -> Vec<EquationCapture> {
     let mut captures = Vec::new();
 
-    for (page_index, page) in paged_doc.pages.iter().enumerate() {
+    for (page_index, page) in paged_doc.pages().iter().enumerate() {
         let mut stack: Vec<EquationBuilder> = Vec::new();
         collect_equations_from_frame(
             &page.frame,
@@ -772,11 +775,17 @@ fn render_equations_to_png(
     let mut rendered = Vec::new();
 
     for (index, capture) in captures.iter().enumerate() {
-        let mut page = paged_doc.pages[capture.page_index].clone();
+        let mut page = paged_doc.pages()[capture.page_index].clone();
         page.frame = capture.frame.clone();
         page.fill = Smart::Custom(None);
 
-        let pixmap = render_page(&page, pixel_per_pt);
+        let pixmap = render_page(
+            &page,
+            &RenderOptions {
+                pixel_per_pt: (pixel_per_pt as f64).into(),
+                ..Default::default()
+            },
+        );
 
         let image = RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixmap.data().to_vec())
             .ok_or_else(|| anyhow!("failed to build RGBA image for equation {}", index + 1))?;
@@ -837,7 +846,7 @@ fn walk_frame<'py>(
     mso_auto_shape: &Bound<'py, PyAny>,
     mso_connector: &Bound<'py, PyAny>,
     equation_stack: &mut Vec<Location>,
-    introspector: &Introspector,
+    introspector: &dyn Introspector,
     slides: &[Bound<'py, PyAny>],
 ) -> PyResult<()> {
     let shapes = slide.getattr("shapes")?;
@@ -975,8 +984,9 @@ fn walk_frame<'py>(
                     });
                     raster_frame.push(Point::zero(), FrameItem::Group(group));
 
-                    let page = typst::layout::Page {
+                    let page = Page {
                         frame: raster_frame,
+                        bleed: Default::default(),
                         fill: Smart::Custom(None),
                         numbering: None,
                         supplement: Content::empty(),
@@ -985,7 +995,13 @@ fn walk_frame<'py>(
 
                     let dpi: f32 = 300.0;
                     let pixel_per_pt: f32 = dpi / 72.0;
-                    let pixmap = render_page(&page, pixel_per_pt);
+                    let pixmap = render_page(
+                        &page,
+                        &RenderOptions {
+                            pixel_per_pt: (pixel_per_pt as f64).into(),
+                            ..Default::default()
+                        },
+                    );
                     let image = RgbaImage::from_raw(
                         pixmap.width(),
                         pixmap.height(),
@@ -1246,8 +1262,9 @@ fn walk_frame<'py>(
                         });
                         raster_frame.push(Point::zero(), FrameItem::Group(group));
 
-                        let page = typst::layout::Page {
+                        let page = Page {
                             frame: raster_frame,
+                            bleed: Default::default(),
                             fill: Smart::Custom(None),
                             numbering: None,
                             supplement: Content::empty(),
@@ -1256,7 +1273,13 @@ fn walk_frame<'py>(
 
                         let dpi: f32 = 300.0;
                         let pixel_per_pt: f32 = dpi / 72.0;
-                        let pixmap = render_page(&page, pixel_per_pt);
+                        let pixmap = render_page(
+                            &page,
+                            &RenderOptions {
+                                pixel_per_pt: (pixel_per_pt as f64).into(),
+                                ..Default::default()
+                            },
+                        );
                         let raster_image = RgbaImage::from_raw(
                             pixmap.width(),
                             pixmap.height(),
@@ -1310,8 +1333,7 @@ fn walk_frame<'py>(
                     // Render the SVG into a PNG buffer sized to the Typst layout box at 300 dpi.
                     let dpi: f32 = 300.0;
                     let pixel_per_pt: f32 = dpi / 72.0;
-                    let to_px =
-                        |pt: f64| ((pt * pixel_per_pt as f64).max(1.0).ceil()) as u32;
+                    let to_px = |pt: f64| ((pt * pixel_per_pt as f64).max(1.0).ceil()) as u32;
                     let width_pt = size.x.to_pt();
                     let height_pt = size.y.to_pt();
                     let width_px = to_px(width_pt);
@@ -1397,8 +1419,9 @@ fn walk_frame<'py>(
                         });
                         raster_frame.push(Point::zero(), FrameItem::Group(group));
 
-                        let page = typst::layout::Page {
+                        let page = Page {
                             frame: raster_frame,
+                            bleed: Default::default(),
                             fill: Smart::Custom(None),
                             numbering: None,
                             supplement: Content::empty(),
@@ -1407,14 +1430,22 @@ fn walk_frame<'py>(
 
                         let dpi: f32 = 300.0;
                         let pixel_per_pt: f32 = dpi / 72.0;
-                        let pixmap = render_page(&page, pixel_per_pt);
+                        let pixmap = render_page(
+                            &page,
+                            &RenderOptions {
+                                pixel_per_pt: (pixel_per_pt as f64).into(),
+                                ..Default::default()
+                            },
+                        );
                         let raster_image = RgbaImage::from_raw(
                             pixmap.width(),
                             pixmap.height(),
                             pixmap.data().to_vec(),
                         )
                         .ok_or_else(|| {
-                            PyRuntimeError::new_err("failed to build RGBA image for sheared svg")
+                            PyRuntimeError::new_err(
+                                "failed to build RGBA image for rasterized image",
+                            )
                         })?;
 
                         let (cropped, crop_min_x_px, crop_min_y_px) =
@@ -1456,6 +1487,109 @@ fn walk_frame<'py>(
                             ),
                         )?;
                     }
+                }
+                ImageKind::Pdf(_) => {
+                    let width_pt = size.x.to_pt();
+                    let height_pt = size.y.to_pt();
+                    let corners = [
+                        item_transform.apply_point(0.0, 0.0),
+                        item_transform.apply_point(width_pt, 0.0),
+                        item_transform.apply_point(width_pt, height_pt),
+                        item_transform.apply_point(0.0, height_pt),
+                    ];
+                    let (min_x, min_y, max_x, max_y) = corners.iter().fold(
+                        (
+                            f64::INFINITY,
+                            f64::INFINITY,
+                            f64::NEG_INFINITY,
+                            f64::NEG_INFINITY,
+                        ),
+                        |(lx, ly, rx, by), (x, y)| (lx.min(*x), ly.min(*y), rx.max(*x), by.max(*y)),
+                    );
+                    let target_width_pt = (max_x - min_x).max(0.1);
+                    let target_height_pt = (max_y - min_y).max(0.1);
+
+                    let mut subframe = Frame::hard(Size::zero());
+                    subframe.push(
+                        Point::zero(),
+                        FrameItem::Image(image.clone(), *size, *_span),
+                    );
+
+                    let adjusted = Affine::translate(-min_x, -min_y).mul(item_transform);
+                    let mut group = GroupItem::new(subframe);
+                    group.transform = affine_to_typst_transform(adjusted);
+
+                    let mut raster_frame = Frame::hard(Size {
+                        x: Abs::pt(target_width_pt),
+                        y: Abs::pt(target_height_pt),
+                    });
+                    raster_frame.push(Point::zero(), FrameItem::Group(group));
+
+                    let page = Page {
+                        frame: raster_frame,
+                        bleed: Default::default(),
+                        fill: Smart::Custom(None),
+                        numbering: None,
+                        supplement: Content::empty(),
+                        number: 0,
+                    };
+
+                    let dpi: f32 = 300.0;
+                    let pixel_per_pt: f32 = dpi / 72.0;
+                    let pixmap = render_page(
+                        &page,
+                        &RenderOptions {
+                            pixel_per_pt: (pixel_per_pt as f64).into(),
+                            ..Default::default()
+                        },
+                    );
+                    let raster_image = RgbaImage::from_raw(
+                        pixmap.width(),
+                        pixmap.height(),
+                        pixmap.data().to_vec(),
+                    )
+                    .ok_or_else(|| {
+                        PyRuntimeError::new_err("failed to build RGBA image for rasterized image")
+                    })?;
+
+                    let (cropped, crop_min_x_px, crop_min_y_px) =
+                        crop_image_to_content(raster_image);
+                    let pixel_per_pt_f64 = pixel_per_pt as f64;
+                    let final_width_pt = cropped.width() as f64 / pixel_per_pt_f64;
+                    let final_height_pt = cropped.height() as f64 / pixel_per_pt_f64;
+                    let final_left_pt = min_x + (crop_min_x_px as f64 / pixel_per_pt_f64);
+                    let final_top_pt = min_y + (crop_min_y_px as f64 / pixel_per_pt_f64);
+
+                    let mut final_png_bytes = Vec::new();
+                    let encoder = PngEncoder::new(&mut final_png_bytes);
+                    encoder
+                        .write_image(
+                            cropped.as_raw(),
+                            cropped.width(),
+                            cropped.height(),
+                            ColorType::Rgba8.into(),
+                        )
+                        .map_err(|err| {
+                            PyRuntimeError::new_err(format!("PNG encode failed: {err}"))
+                        })?;
+
+                    let final_bytes = PyBytes::new(py, &final_png_bytes);
+                    let final_buffer = io.getattr("BytesIO")?.call1((final_bytes,))?;
+
+                    let final_left = pt.call1((final_left_pt,))?;
+                    let final_top = pt.call1((final_top_pt,))?;
+                    let final_width = pt.call1((final_width_pt,))?;
+                    let final_height = pt.call1((final_height_pt,))?;
+                    shapes.call_method1(
+                        "add_picture",
+                        (
+                            final_buffer,
+                            final_left,
+                            final_top,
+                            final_width,
+                            final_height,
+                        ),
+                    )?;
                 }
             },
             FrameItem::Link(dest, size) => {
@@ -1527,7 +1661,7 @@ fn walk_paged_document(
 
     // Set slide size from Typst page dimensions
     let first_page = paged_doc
-        .pages
+        .pages()
         .first()
         .ok_or_else(|| PyRuntimeError::new_err("Typst document contained no pages"))?;
     let width_pt = first_page.frame.width().to_pt();
@@ -1536,13 +1670,13 @@ fn walk_paged_document(
     presentation.setattr("slide_width", pt.call1((width_pt,))?)?;
     presentation.setattr("slide_height", pt.call1((height_pt,))?)?;
 
-    let mut slide_refs = Vec::with_capacity(paged_doc.pages.len());
-    for _ in &paged_doc.pages {
+    let mut slide_refs = Vec::with_capacity(paged_doc.pages().len());
+    for _ in paged_doc.pages() {
         slide_refs.push(slides.call_method1("add_slide", (blank_layout.clone(),))?);
     }
 
     // Create slides and render content
-    for (page_index, (page, slide)) in paged_doc.pages.iter().zip(slide_refs.iter()).enumerate() {
+    for (page_index, (page, slide)) in paged_doc.pages().iter().zip(slide_refs.iter()).enumerate() {
         // Apply page background if explicitly set in Typst.
         if let Smart::Custom(fill) = &page.fill {
             let background = slide.getattr("background")?;
@@ -1560,7 +1694,7 @@ fn walk_paged_document(
             &mso_auto_shape,
             &mso_connector,
             &mut equation_stack,
-            &paged_doc.introspector,
+            paged_doc.introspector().as_ref(),
             &slide_refs,
         )?;
 
@@ -1597,7 +1731,7 @@ fn format_typst_messages(messages: impl IntoIterator<Item = SourceDiagnostic>) -
                 let hints = diagnostic
                     .hints
                     .iter()
-                    .map(ToString::to_string)
+                    .map(|hint| hint.v.to_string())
                     .collect::<Vec<_>>()
                     .join("; ");
                 message.push_str(&format!(" (hints: {hints})"));
