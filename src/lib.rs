@@ -992,8 +992,6 @@ fn walk_frame<'py>(
                         (min_x, min_y, max_x - min_x, max_y - min_y, None, 1.0, 1.0)
                     };
 
-                let left = pt.call1((left_pt,))?;
-                let top = pt.call1((top_pt,))?;
                 let width = pt.call1((width_pt,))?;
                 let height = pt.call1((height_pt,))?;
                 let non_uniform_scale = (scale_x - scale_y).abs() > 1e-6;
@@ -1113,7 +1111,26 @@ fn walk_frame<'py>(
                     )?;
                     continue;
                 } else {
-                    let textbox = shapes.call_method1("add_textbox", (left, top, width, height))?;
+                    // Typst positions text using typographic ascenders. Office
+                    // text boxes use the horizontal ascender plus half the
+                    // font's leading, which differs notably for monospace fonts.
+                    let ttf = text.font.ttf();
+                    let office_ascender = text.font.to_em(ttf.ascender()).at(text.size).to_pt()
+                        + text
+                            .font
+                            .to_em(ttf.typographic_line_gap().unwrap_or(ttf.line_gap()))
+                            .at(text.size)
+                            .to_pt()
+                            / 2.0;
+                    let baseline_correction = ascender - office_ascender;
+                    let corrected_left =
+                        pt.call1((left_pt + item_transform.m12 * baseline_correction,))?;
+                    let corrected_top =
+                        pt.call1((top_pt + item_transform.m22 * baseline_correction,))?;
+                    let textbox = shapes.call_method1(
+                        "add_textbox",
+                        (corrected_left, corrected_top, width, height),
+                    )?;
                     if let Some(rotation_deg) = rotation_deg {
                         textbox.setattr("rotation", rotation_deg)?;
                     }
