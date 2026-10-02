@@ -441,6 +441,24 @@ fn apply_stroke<'py>(
 
 fn disable_shadow(shape: &Bound<'_, PyAny>) -> PyResult<()> {
     shape.getattr("shadow")?.setattr("inherit", false)?;
+    let element = shape.getattr("_element")?;
+    // Clear both explicit effects and theme effect references. An empty
+    // effect list alone can still leave a theme shadow in some viewers.
+    for effects in element
+        .call_method1("xpath", ("./p:spPr/a:effectLst | ./p:spPr/a:effectDag",))?
+        .try_iter()?
+    {
+        let effects = effects?;
+        for child in effects.call_method0("getchildren")?.try_iter()? {
+            effects.call_method1("remove", (child?,))?;
+        }
+    }
+    for effect_ref in element
+        .call_method1("xpath", ("./p:style/a:effectRef",))?
+        .try_iter()?
+    {
+        effect_ref?.call_method1("set", ("idx", "0"))?;
+    }
     Ok(())
 }
 
@@ -1765,6 +1783,13 @@ fn walk_paged_document(
         }
     }
 
+    // Apply the same flat styling to pictures and equation images as to
+    // editable geometry, including anything added after walking the frame.
+    for slide in &slide_refs {
+        for shape in slide.getattr("shapes")?.try_iter()? {
+            disable_shadow(&shape?)?;
+        }
+    }
     presentation.call_method1("save", (output_path.to_string_lossy().as_ref(),))?;
     Ok(())
 }
