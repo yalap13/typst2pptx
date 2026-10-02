@@ -1,6 +1,15 @@
-name: "Publish release to PyPI"
+name: "Build wheels and publish releases"
 
 on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "pyproject.toml"
+      - "python/**"
+      - "src/**"
+      - ".github/workflows/release.yml"
   push:
     tags:
       # Publish on version tags, e.g. v0.1.0
@@ -9,10 +18,24 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+[ab][0-9]+"
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  wheels:
+    name: Wheels (${{ matrix.platform.name }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+        platform:
+          - { name: linux-x64, runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { name: windows-x64, runner: windows-2022, target: x86_64-pc-windows-msvc }
+          - { name: macos-intel, runner: macos-15-intel, target: x86_64-apple-darwin }
+          - { name: macos-arm64, runner: macos-14, target: aarch64-apple-darwin }
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -24,18 +47,64 @@ jobs:
         with:
           enable-cache: false
 
-      - name: Build
-        run: uv build
+      - name: Install Python
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: uv python install "$PYTHON_VERSION"
 
-      - name: Upload distributions as artifacts
+      - name: Build portable Linux wheel
+        if: runner.os == 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: ${{ matrix.platform.target }}
+          manylinux: "2_28"
+          args: --release --locked --strip --out dist --interpreter python${{ matrix.python }}
+
+      - name: Build macOS or Windows wheel
+        if: runner.os != 'Linux'
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          RUST_TARGET: ${{ matrix.platform.target }}
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          uv tool run --from 'maturin>=1.7,<2' maturin build --release --locked --strip --out dist --target "$RUST_TARGET" --interpreter "$(uv python find "$PYTHON_VERSION")"
+
+      - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: dist
-          path: dist/
+          name: dist-${{ matrix.platform.name }}-py${{ matrix.python }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: false
+      - name: Build source distribution
+        run: uv build --sdist --out-dir dist
+      - name: Upload source distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
 
   publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs:
-      - build
+      - wheels
+      - sdist
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -50,7 +119,8 @@ jobs:
       - name: Download distributions artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist/
 
       - name: Generate PEP 740 attestations
