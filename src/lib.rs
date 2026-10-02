@@ -869,6 +869,7 @@ fn walk_frame<'py>(
     mso_auto_shape: &Bound<'py, PyAny>,
     mso_connector: &Bound<'py, PyAny>,
     equation_stack: &mut Vec<Location>,
+    script_stack: &mut Vec<Location>,
     introspector: &dyn Introspector,
     slides: &[Bound<'py, PyAny>],
 ) -> PyResult<()> {
@@ -896,11 +897,23 @@ fn walk_frame<'py>(
                     mso_auto_shape,
                     mso_connector,
                     equation_stack,
+                    script_stack,
                     introspector,
                     slides,
                 )?;
             }
             FrameItem::Tag(tag) => {
+                if let Tag::Start(elem, _) = tag {
+                    if matches!(elem.elem().name(), "sub" | "super") {
+                        if let Some(location) = elem.location() {
+                            script_stack.push(location);
+                        }
+                    }
+                } else if let Tag::End(location, _, _) = tag {
+                    if script_stack.last() == Some(location) {
+                        script_stack.pop();
+                    }
+                }
                 if let Some(loc) = equation_start_location(tag) {
                     equation_stack.push(loc);
                 } else if let Some(location) = equation_end_location(tag) {
@@ -967,7 +980,22 @@ fn walk_frame<'py>(
                 let height = pt.call1((height_pt,))?;
                 let non_uniform_scale = (scale_x - scale_y).abs() > 1e-6;
                 let has_shear = item_transform.has_shear();
-                let needs_raster = non_uniform_scale || has_shear;
+                // Dedicated OpenType script glyphs are lost when python-pptx
+                // reshapes the original characters. Render these runs using
+                // Typst's shaped glyphs; synthesized scripts stay editable.
+                let shaped_script = !script_stack.is_empty()
+                    && text.glyphs.iter().any(|glyph| {
+                        let mut chars = text.text[glyph.range()].chars();
+                        match (chars.next(), chars.next()) {
+                            (Some(c), None) => {
+                                text.font.ttf().glyph_index(c)
+                                    != Some(ttf_parser::GlyphId(glyph.id))
+                                    || glyph.y_offset.get() != 0.0
+                            }
+                            _ => true,
+                        }
+                    });
+                let needs_raster = non_uniform_scale || has_shear || shaped_script;
 
                 if needs_raster {
                     // Compute axis-aligned bounds from the full transform (includes rotation).
@@ -1706,6 +1734,7 @@ fn walk_paged_document(
         }
 
         let mut equation_stack: Vec<Location> = Vec::new();
+        let mut script_stack: Vec<Location> = Vec::new();
         walk_frame(
             &page.frame,
             Affine::identity(),
@@ -1716,6 +1745,7 @@ fn walk_paged_document(
             &mso_auto_shape,
             &mso_connector,
             &mut equation_stack,
+            &mut script_stack,
             paged_doc.introspector().as_ref(),
             &slide_refs,
         )?;
